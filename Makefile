@@ -1,5 +1,5 @@
 ifneq ($(KERNELRELEASE),)
-obj-m		:= driver.o
+obj-m		:= ethpipe.o
 else
 KDIR		:= /lib/modules/$(shell uname -r)/build/
 PWD		:= $(shell pwd)
