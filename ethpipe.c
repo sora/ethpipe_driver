@@ -92,7 +92,7 @@ static struct file_operations ep_fops = {
 	.release  = ep_release,
 };
 
-static struct miscdevice ep_dev = {
+static struct miscdevice ep_misc_device = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name  = EP_DEV_DIR,
 	.fops  = &ep_fops,
@@ -113,8 +113,8 @@ static int ep_init_one(void)
 
 	/* register ethpipe character device */
 	sprintf( devname, "%s/%d", EP_DEV_DIR, board_idx );
-	ep_dev.name = devname;
-	ret = misc_register(&ep_dev);
+	ep_misc_device.name = devname;
+	ret = misc_register(&ep_misc_device);
 	if (ret) {
 		printk("Fail to misc_register (MISC_DYNAMIC_MINOR)\n");
 		return ret;
@@ -140,7 +140,7 @@ static int __init ep_init(void)
 static void __exit ep_cleanup(void)
 {
 	printk("%s\n", __func__);
-	misc_deregister(&ep_dev);
+	misc_deregister(&ep_misc_device);
 }
 
 module_init(ep_init);
