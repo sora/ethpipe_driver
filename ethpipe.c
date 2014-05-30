@@ -8,11 +8,13 @@
 #include <linux/uaccess.h>
 #include <linux/stat.h>
 
-#define DRV_NAME	"ethpipe"
 #define VERSION "0.3.0"
+
 #define MAX_PKT_LEN	(9014)
 #define ETHPIPE_HDR_LEN	(14)
 #define MAX_BUF_LEN	(32)
+
+#define EP_PROC_DIR	"ethpipe"
 
 static int buf_pos = 0;
 
@@ -90,7 +92,7 @@ static struct file_operations ethpipe_fops = {
 
 static struct miscdevice ethpipe_dev = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name  = DRV_NAME,
+	.name  = EP_PROC_DIR,
 	.fops  = &ethpipe_fops,
 };
 
@@ -108,7 +110,7 @@ static int ethpipe_init_one(void)
 	printk( KERN_INFO "board_idx: %d\n", board_idx );
 
 	/* register ethpipe character device */
-	sprintf( devname, "%s/%d", DRV_NAME, board_idx );
+	sprintf( devname, "%s/%d", EP_PROC_DIR, board_idx );
 	ethpipe_dev.name = devname;
 	ret = misc_register(&ethpipe_dev);
 	if (ret) {
