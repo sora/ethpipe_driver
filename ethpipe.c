@@ -4,6 +4,7 @@
 #include <linux/moduleparam.h>
 
 #include <linux/fs.h>
+#include <linux/proc_fs.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 #include <linux/stat.h>
@@ -11,7 +12,7 @@
 #define VERSION "0.3.0"
 
 #define MAX_PKT_LEN	(9014)
-#define ETHPIPE_HDR_LEN	(14)
+#define EP_HDR_LEN	(14)
 #define MAX_BUF_LEN	(32)
 
 #define EP_DEV_DIR	"ethpipe"
@@ -23,10 +24,10 @@ static int buf_pos = 0;
 static int debug;
 
 /**
- * ethpipe_open
+ * ep_open
  *
  **/
-static int ethpipe_open(struct inode *inode, struct file *file)
+static int ep_open(struct inode *inode, struct file *file)
 {
 
   if (debug)
@@ -36,13 +37,13 @@ static int ethpipe_open(struct inode *inode, struct file *file)
 }
 
 /**
- * ethpipe_write
+ * ep_write
  *
  **/
-static ssize_t ethpipe_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+static ssize_t ep_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
 	unsigned int copy_len = 0;
-	static unsigned char pkt[ETHPIPE_HDR_LEN+MAX_PKT_LEN] = {0};
+	static unsigned char pkt[EP_HDR_LEN+MAX_PKT_LEN] = {0};
 
   if (debug)
     printk("%s\n", __func__);
@@ -73,10 +74,10 @@ static ssize_t ethpipe_write(struct file *file, const char __user *buf, size_t c
 }
 
 /**
- * ethpipe_release
+ * ep_release
  *
  **/
-static int ethpipe_release(struct inode *inode, struct file *file)
+static int ep_release(struct inode *inode, struct file *file)
 {
   if (debug)
     printk("%s\n", __func__);
@@ -84,24 +85,24 @@ static int ethpipe_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static struct file_operations ethpipe_fops = {
+static struct file_operations ep_fops = {
 	.owner    = THIS_MODULE,
-	.open     = ethpipe_open,
-	.write    = ethpipe_write,
-	.release  = ethpipe_release,
+	.open     = ep_open,
+	.write    = ep_write,
+	.release  = ep_release,
 };
 
-static struct miscdevice ethpipe_dev = {
+static struct miscdevice ep_dev = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name  = EP_DEV_DIR,
-	.fops  = &ethpipe_fops,
+	.fops  = &ep_fops,
 };
 
 /**
- * ethpipe_init_one
+ * ep_init_one
  *
  **/
-static int ethpipe_init_one(void)
+static int ep_init_one(void)
 {
 	static char devname[16];
 	static int board_idx = -1;
@@ -112,8 +113,8 @@ static int ethpipe_init_one(void)
 
 	/* register ethpipe character device */
 	sprintf( devname, "%s/%d", EP_DEV_DIR, board_idx );
-	ethpipe_dev.name = devname;
-	ret = misc_register(&ethpipe_dev);
+	ep_dev.name = devname;
+	ret = misc_register(&ep_dev);
 	if (ret) {
 		printk("Fail to misc_register (MISC_DYNAMIC_MINOR)\n");
 		return ret;
@@ -123,23 +124,23 @@ static int ethpipe_init_one(void)
 }
 
 /**
- * ethpipe_init_module
+ * ep_init_module
  *
  **/
 static int __init ep_init(void)
 {
 	pr_info("%s\n", __func__);
-	return ethpipe_init_one();
+	return ep_init_one();
 }
 
 /**
- * ethpipe_exit_module
+ * ep_exit_module
  *
  **/
 static void __exit ep_cleanup(void)
 {
 	printk("%s\n", __func__);
-	misc_deregister(&ethpipe_dev);
+	misc_deregister(&ep_dev);
 }
 
 module_init(ep_init);
