@@ -1,24 +1,23 @@
+#include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
+
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
-
-#define DEBUG
+#include <linux/stat.h>
 
 #define DRV_NAME	"ethpipe"
-#define DRV_VERSION "0.3.0"
-#define ETHPIPE_DRIVER_NAME	DRV_NAME " -- EtherPIPE driver " DRV_VERSION
-
+#define VERSION "0.3.0"
 #define MAX_PKT_LEN	(9014)
 #define ETHPIPE_HDR_LEN	(14)
-
 #define MAX_BUF_LEN	(32)
 
 static int buf_pos = 0;
 
-
-MODULE_LICENSE("GPL");
-MODULE_VERSION(DRV_VERSION);
+/* module parameters */
+static int debug;
 
 /**
  * ethpipe_open
@@ -26,9 +25,9 @@ MODULE_VERSION(DRV_VERSION);
  **/
 static int ethpipe_open(struct inode *inode, struct file *file)
 {
-#ifdef DEBUG
-	printk("%s\n", __func__);
-#endif
+
+  if (debug)
+    printk("%s\n", __func__);
 
 	return 0;
 }
@@ -42,9 +41,8 @@ static ssize_t ethpipe_write(struct file *file, const char __user *buf, size_t c
 	unsigned int copy_len = 0;
 	static unsigned char pkt[ETHPIPE_HDR_LEN+MAX_PKT_LEN] = {0};
 
-#ifdef DEBUG
-	printk("%s\n", __func__);
-#endif
+  if (debug)
+    printk("%s\n", __func__);
 
 	if (count > (MAX_BUF_LEN - buf_pos)) {
 		copy_len = MAX_BUF_LEN - buf_pos;
@@ -60,15 +58,13 @@ static ssize_t ethpipe_write(struct file *file, const char __user *buf, size_t c
 	*ppos += copy_len;
 	buf_pos += copy_len;
 
-#ifdef DEBUG
-	printk( KERN_INFO "buf_pos = %d\n", buf_pos );
-#endif
+  if (debug) {
+    printk( KERN_INFO "buf_pos = %d\n", buf_pos );
 
-#ifdef DEBUG
-	printk( "DEBUG: pkt = %02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x\n",
-		pkt[ 0], pkt[ 1], pkt[ 2], pkt[ 3], pkt[ 4], pkt[ 5], pkt[ 6], pkt[ 7],
-		pkt[ 8], pkt[ 9], pkt[10], pkt[11], pkt[12], pkt[13], pkt[14], pkt[15] );
-#endif
+    printk( "DEBUG: pkt = %02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x\n",
+      pkt[ 0], pkt[ 1], pkt[ 2], pkt[ 3], pkt[ 4], pkt[ 5], pkt[ 6], pkt[ 7],
+      pkt[ 8], pkt[ 9], pkt[10], pkt[11] );
+  }
 
 	return count;
 }
@@ -79,9 +75,8 @@ static ssize_t ethpipe_write(struct file *file, const char __user *buf, size_t c
  **/
 static int ethpipe_release(struct inode *inode, struct file *file)
 {
-#ifdef DEBUG
-	printk("%s\n", __func__);
-#endif
+  if (debug)
+    printk("%s\n", __func__);
 
 	return 0;
 }
@@ -128,24 +123,28 @@ static int ethpipe_init_one(void)
  * ethpipe_init_module
  *
  **/
-static int __init ethpipe_init_module(void)
+static int __init ep_init(void)
 {
-	printk("%s\n", __func__);
-	pr_info(ETHPIPE_DRIVER_NAME "\n");
+	pr_info("%s\n", __func__);
 	return ethpipe_init_one();
 }
-
-module_init(ethpipe_init_module);
 
 /**
  * ethpipe_exit_module
  *
  **/
-static void __exit ethpipe_exit_module(void)
+static void __exit ep_cleanup(void)
 {
 	printk("%s\n", __func__);
 	misc_deregister(&ethpipe_dev);
 }
 
-module_exit(ethpipe_exit_module);
+module_init(ep_init);
+module_exit(ep_cleanup);
 
+MODULE_AUTHOR("Yohei Kuga <sora@haeena.net>");
+MODULE_DESCRIPTION("Ethernet Character device");
+MODULE_LICENSE("GPL");
+MODULE_VERSION(VERSION);
+module_param(debug, int, S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(debug, "Enable debug mode");
