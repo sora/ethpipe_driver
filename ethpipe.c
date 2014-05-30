@@ -8,6 +8,7 @@
 #include <linux/miscdevice.h>
 #include <linux/uaccess.h>
 #include <linux/stat.h>
+#include <linux/seq_file.h>
 
 #define VERSION "0.3.0"
 
@@ -18,10 +19,85 @@
 #define EP_DEV_DIR	"ethpipe"
 #define EP_PROC_DIR	"ethpipe"
 
+/* module parameters */
+static int debug = 1;
+
+struct proc_dir_entry *ep_proc_root;    /* proc root dir */
+
 static int buf_pos = 0;
 
-/* module parameters */
-static int debug;
+unsigned long long *reg_counter;
+unsigned long long *reg_lap1, *reg_lap2;
+
+/* tmp */
+unsigned long long counter_data = 9999;
+unsigned long long lap1_data = 1111;
+unsigned long long lap2_data = 2222;
+int counter_tmp, lap1_tmp, lap2_tmp;
+
+/**
+ * procfs handle functions
+ *
+ **/
+
+static ssize_t counter_show( struct file *file, char *buf, size_t count, loff_t *ppos )
+{
+  if (debug)
+    printk("%s\n", __func__);
+
+  sprintf(buf, "%llX\n", *reg_counter);
+  return count;
+}
+
+static ssize_t lap1_show( struct file *file, char *buf, size_t count, loff_t *ppos )
+{
+  if (debug)
+    printk("%s\n", __func__);
+
+  return sprintf(buf, "%llX\n", *reg_lap1);
+}
+
+static ssize_t lap1_store(struct file *file, const char __user *buf,
+        size_t count, loff_t *ppos)
+{
+  if (debug)
+    printk("%s\n", __func__);
+
+  sscanf(buf, "%llX", reg_lap1);
+  return count;
+}
+
+static ssize_t lap2_show( struct file *file, char *buf, size_t count, loff_t *ppos )
+{
+  if (debug)
+    printk("%s\n", __func__);
+
+  return sprintf(buf, "%llX\n", *reg_lap2);
+}
+
+static ssize_t lap2_store(struct file *file, const char __user *buf,
+        size_t count, loff_t *ppos)
+{
+  if (debug)
+    printk("%s\n", __func__);
+
+  sscanf(buf, "%llX", reg_lap2);
+  return count;
+}
+
+static const struct file_operations proc_counter_fops = {
+  .read = counter_show,
+};
+
+static const struct file_operations proc_lap1_fops = {
+  .read = lap1_show,
+  .write = lap1_store,
+};
+
+static const struct file_operations proc_lap2_fops = {
+  .read = lap2_show,
+  .write = lap2_store,
+};
 
 /**
  * ep_open
@@ -106,7 +182,13 @@ static int ep_init_one(void)
 {
 	static char devname[16];
 	static int board_idx = -1;
+  struct proc_dir_entry *pe_counter, *pe_lap1, *pe_lap2;
 	int ret;
+
+  /* tmp */
+  reg_counter = &counter_data;
+  reg_lap1 = &lap1_data;
+  reg_lap2 = &lap2_data;
 
 	++board_idx;
 	printk( KERN_INFO "board_idx: %d\n", board_idx );
@@ -120,7 +202,41 @@ static int ep_init_one(void)
 		return ret;
 	}
 
+  /* register ethpipe procfs entries */
+  ep_proc_root = proc_mkdir(EP_PROC_DIR, NULL);    // proc root dir
+  if (!ep_proc_root) {
+    pr_warn("cannot create /proc/net/%s\n", EP_PROC_DIR);
+    return -ENODEV;
+  }
+  pe_counter = proc_create("counter", 0666, ep_proc_root, &proc_counter_fops);    // counter
+  if (pe_counter == NULL) {
+    pr_err("cannot create %s procfs entry\n", "counter");
+    ret = -EINVAL;
+    goto remove_counter;
+  }
+  pe_lap1 = proc_create("lap1", 0666, ep_proc_root, &proc_lap1_fops);    // lap1
+  if (pe_lap1 == NULL) {
+    pr_err("cannot create %s procfs entry\n", "lap1");
+    ret = -EINVAL;
+    goto remove_lap1;
+  }
+  pe_lap2 = proc_create("lap2", 0666, ep_proc_root, &proc_lap2_fops);    // lap2
+  if (pe_lap2 == NULL) {
+    pr_err("cannot create %s procfs entry\n", "lap2");
+    ret = -EINVAL;
+    goto remove_lap2;
+  }
+
 	return 0;
+
+remove_lap2:
+  remove_proc_entry("lap2", ep_proc_root);
+remove_lap1:
+  remove_proc_entry("lap1", ep_proc_root);
+remove_counter:
+  remove_proc_entry("counter", ep_proc_root);
+  remove_proc_entry(EP_PROC_DIR, NULL);
+  return ret;
 }
 
 /**
@@ -141,6 +257,11 @@ static void __exit ep_cleanup(void)
 {
 	printk("%s\n", __func__);
 	misc_deregister(&ep_misc_device);
+
+  remove_proc_entry("lap2", ep_proc_root);
+  remove_proc_entry("lap1", ep_proc_root);
+  remove_proc_entry("counter", ep_proc_root);
+  remove_proc_entry(EP_PROC_DIR, NULL);
 }
 
 module_init(ep_init);
