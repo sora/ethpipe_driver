@@ -184,16 +184,10 @@ static int ep_init_one(void)
 {
 	static char devname[16];
 	static int board_idx = -1;
-	struct proc_dir_entry *pe_counter, *pe_lap1, *pe_lap2;
 	int ret;
 
-	/* tmp */
-	reg_counter = &counter_data;
-	reg_lap1 = &lap1_data;
-	reg_lap2 = &lap2_data;
-
 	++board_idx;
-	printk( KERN_INFO "board_idx: %d\n", board_idx );
+	pr_info( "board_idx: %d\n", board_idx );
 
 	/* register ethpipe character device */
 	sprintf( devname, "%s/%d", EP_DEV_DIR, board_idx );
@@ -203,6 +197,25 @@ static int ep_init_one(void)
 		printk("Fail to misc_register (MISC_DYNAMIC_MINOR)\n");
 		return ret;
 	}
+
+	return 0;
+}
+
+/**
+ * ep_init_module
+ *
+ **/
+static int __init ep_init(void)
+{
+	struct proc_dir_entry *pe_counter, *pe_lap1, *pe_lap2;
+	int ret;
+
+	pr_info("%s\n", __func__);
+
+	/* tmp */
+	reg_counter = &counter_data;
+	reg_lap1 = &lap1_data;
+	reg_lap2 = &lap2_data;
 
 	/* register ethpipe procfs entries */
 	// dir: /proc/ethpipe
@@ -233,7 +246,7 @@ static int ep_init_one(void)
 		goto remove_lap2;
 	}
 
-	return 0;
+	return ep_init_one();
 
 remove_lap2:
 	remove_proc_entry("lap2", ep_proc_root);
@@ -243,16 +256,6 @@ remove_counter:
 	remove_proc_entry("counter", ep_proc_root);
 	remove_proc_entry(EP_PROC_DIR, NULL);
 	return ret;
-}
-
-/**
- * ep_init_module
- *
- **/
-static int __init ep_init(void)
-{
-	pr_info("%s\n", __func__);
-	return ep_init_one();
 }
 
 /**
