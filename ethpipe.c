@@ -39,7 +39,6 @@ int counter_tmp, lap1_tmp, lap2_tmp;
  * procfs handle functions
  *
  **/
-
 static ssize_t counter_show( struct file *file, char *buf, size_t count, loff_t *ppos )
 {
   if (debug)
@@ -105,7 +104,6 @@ static const struct file_operations proc_lap2_fops = {
  **/
 static int ep_open(struct inode *inode, struct file *file)
 {
-
   if (debug)
     printk("%s\n", __func__);
 
@@ -205,7 +203,7 @@ static int ep_init_one(void)
   /* register ethpipe procfs entries */
   ep_proc_root = proc_mkdir(EP_PROC_DIR, NULL);    // proc root dir
   if (!ep_proc_root) {
-    pr_warn("cannot create /proc/net/%s\n", EP_PROC_DIR);
+    pr_warn("cannot create /proc/%s\n", EP_PROC_DIR);
     return -ENODEV;
   }
   pe_counter = proc_create("counter", 0666, ep_proc_root, &proc_counter_fops);    // counter
