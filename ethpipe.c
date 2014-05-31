@@ -12,6 +12,7 @@
 
 #include <linux/pci.h>
 #include <linux/interrupt.h>
+#include <linux/workqueue.h>
 
 
 #define VERSION "0.3.0"
@@ -37,6 +38,10 @@ static unsigned long long mmio0_start, mmio0_end, mmio0_flags, mmio0_len;
 static unsigned long long mmio1_start, mmio1_end, mmio1_flags, mmio1_len;
 unsigned long long *reg_counter;
 unsigned long long *reg_lap1, *reg_lap2;
+
+/* workqueue */
+static struct workqueue_struct *ep_wq;
+struct work_struct work1;
 
 /* procfs */
 struct proc_dir_entry *ep_proc_root;    // proc root dir
@@ -209,7 +214,7 @@ static irqreturn_t ep_interrupt(int irq, void *pdev)
 	handled = 1;
 
 	// schedule workqueue
-	
+	queue_work(ep_wq, &work1);
 
 	// clear interrupt flag
 	*(mmio0_ptr + 0x10) = status & 0xf7;
@@ -326,6 +331,16 @@ static struct pci_driver ep_pci_driver = {
 };
 
 /**
+ * work_body
+ *
+ **/
+void work_body(struct work_struct *work)
+{
+	pr_info("%s\n", __func__);
+	return;
+}
+
+/**
  * ep_init
  *
  **/
@@ -340,6 +355,15 @@ static int __init ep_init(void)
 	reg_counter = &counter_data;
 	reg_lap1 = &lap1_data;
 	reg_lap2 = &lap2_data;
+
+	/* workqueue */
+	ep_wq = alloc_workqueue("ethpipe", WQ_UNBOUND, 0);
+	if (!ep_wq) {
+		pr_err( "alloc_workqueue failed\n" );
+		ret = -ENOMEM;
+		goto out;
+	}
+	INIT_WORK( &work1, work_body );
 
 	/* register ethpipe procfs entries */
 	// dir: /proc/ethpipe
@@ -379,6 +403,7 @@ remove_lap1:
 remove_counter:
 	remove_proc_entry("counter", ep_proc_root);
 	remove_proc_entry(DRV_NAME, NULL);
+out:
 	return ret;
 }
 
@@ -389,9 +414,18 @@ remove_counter:
 static void __exit ep_cleanup(void)
 {
 	pr_info("%s\n", __func__);
+
+	/* pci */
 	misc_deregister(&ep_misc_device);
 	pci_unregister_driver(&ep_pci_driver);
 
+	/* workqueue */
+	if (ep_wq) {
+		destroy_workqueue(ep_wq);
+		ep_wq = NULL;
+	}
+
+	/* procfs */
 	remove_proc_entry("lap2", ep_proc_root);
 	remove_proc_entry("lap1", ep_proc_root);
 	remove_proc_entry("counter", ep_proc_root);
