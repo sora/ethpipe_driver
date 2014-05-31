@@ -11,6 +11,7 @@
 #include <linux/seq_file.h>
 
 #include <linux/pci.h>
+#include <linux/interrupt.h>
 
 
 #define VERSION "0.3.0"
@@ -57,7 +58,7 @@ static ssize_t counter_show( struct file *file, char *buf, size_t count,
 				loff_t *ppos )
 {
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 	
 	sprintf(buf, "%llX\n", *reg_counter);
 	return count;
@@ -67,7 +68,7 @@ static ssize_t lap1_show( struct file *file, char *buf, size_t count,
 				loff_t *ppos )
 {
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 	
 	return sprintf(buf, "%llX\n", *reg_lap1);
 }
@@ -76,7 +77,7 @@ static ssize_t lap1_store(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 	
 	sscanf(buf, "%llX", reg_lap1);
 	return count;
@@ -86,7 +87,7 @@ static ssize_t lap2_show( struct file *file, char *buf, size_t count,
 				loff_t *ppos )
 {
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 	
 	return sprintf(buf, "%llX\n", *reg_lap2);
 }
@@ -95,7 +96,7 @@ static ssize_t lap2_store(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 
 	sscanf(buf, "%llX", reg_lap2);
 	return count;
@@ -122,7 +123,7 @@ static const struct file_operations proc_lap2_fops = {
 static int ep_open(struct inode *inode, struct file *file)
 {
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 
 	return 0;
 }
@@ -138,7 +139,7 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 	static unsigned char pkt[EP_HDR_LEN+MAX_PKT_LEN] = {0};
 
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 
 	if (count > (MAX_BUF_LEN - buf_pos)) {
 		copy_len = MAX_BUF_LEN - buf_pos;
@@ -147,7 +148,7 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 	}
 
 	if ( copy_from_user( pkt+buf_pos, buf, copy_len )) {
-		printk( KERN_INFO "copy_from_user failed\n" );
+		pr_info( KERN_INFO "copy_from_user failed\n" );
 		return -EFAULT;
 	}
 
@@ -155,9 +156,9 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 	buf_pos += copy_len;
 
 	if (debug) {
-		printk( KERN_INFO "buf_pos = %d\n", buf_pos );
+		pr_info( KERN_INFO "buf_pos = %d\n", buf_pos );
 	
-		printk( "DEBUG: pkt = %02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x\n",
+		pr_info( "DEBUG: pkt = %02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x\n",
 			pkt[ 0], pkt[ 1], pkt[ 2], pkt[ 3], pkt[ 4], pkt[ 5], pkt[ 6], pkt[ 7],
 			pkt[ 8], pkt[ 9], pkt[10], pkt[11] );
 	}
@@ -172,7 +173,7 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 static int ep_release(struct inode *inode, struct file *file)
 {
 	if (debug)
-		printk("%s\n", __func__);
+		pr_info("%s\n", __func__);
 
 	return 0;
 }
@@ -189,6 +190,33 @@ static struct miscdevice ep_misc_device = {
 	.name  = DRV_NAME,
 	.fops  = &ep_fops,
 };
+
+/**
+ * ep_interrupt
+ *
+ **/
+static irqreturn_t ep_interrupt(int irq, void *pdev)
+{
+	int status, handled = 0;
+
+	status = *(mmio0_ptr + 0x10);
+
+	// is ethpipe interrupt?
+	if ( (status & 8) == 0 ) {
+		goto lend;
+	}
+
+	handled = 1;
+
+	// schedule workqueue
+	
+
+	// clear interrupt flag
+	*(mmio0_ptr + 0x10) = status & 0xf7;
+
+lend:
+	return IRQ_RETVAL(handled);
+}
 
 /**
  * ep_init_one
@@ -256,8 +284,13 @@ static int ep_init_one(struct pci_dev *pdev,
 	ep_misc_device.name = devname;
 	ret = misc_register(&ep_misc_device);
 	if (ret) {
-		printk("Fail to misc_register (MISC_DYNAMIC_MINOR)\n");
+		pr_info("Fail to misc_register (MISC_DYNAMIC_MINOR)\n");
 		return ret;
+	}
+
+	/* interrupt handler */
+	if (request_irq( pdev->irq, ep_interrupt, IRQF_SHARED, DRV_NAME, pdev)) {
+		pr_warn( "cannot request_irq\n" );
 	}
 
 	return 0;
@@ -277,6 +310,8 @@ static void ep_remove_one (struct pci_dev *pdev)
 	pr_info("%s\n", __func__);
 
 	/* disable interrupts */
+	disable_irq(pdev->irq);
+	free_irq(pdev->irq, pdev);
 
 	/* detach pci device */
 	pci_release_regions(pdev);
@@ -353,7 +388,7 @@ remove_counter:
  **/
 static void __exit ep_cleanup(void)
 {
-	printk("%s\n", __func__);
+	pr_info("%s\n", __func__);
 	misc_deregister(&ep_misc_device);
 	pci_unregister_driver(&ep_pci_driver);
 
