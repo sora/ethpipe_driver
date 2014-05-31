@@ -10,24 +10,38 @@
 #include <linux/stat.h>
 #include <linux/seq_file.h>
 
+#include <linux/pci.h>
+
+
 #define VERSION "0.3.0"
+#define DRV_NAME "ethpipe"
 
 #define MAX_PKT_LEN	(9014)
 #define EP_HDR_LEN	(14)
 #define MAX_BUF_LEN	(32)
 
-#define EP_DEV_DIR	"ethpipe"
-#define EP_PROC_DIR	"ethpipe"
-
 /* module parameters */
 static int debug = 1;
 
-struct proc_dir_entry *ep_proc_root;    /* proc root dir */
+/* pci parameters */
+static DEFINE_PCI_DEVICE_TABLE(ep_pci_tbl) = {
+	{ 0x3776, 0x8081, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ 0, }
+};
+MODULE_DEVICE_TABLE(pci, ep_pci_tbl);
 
-static int buf_pos = 0;
-
+/* pci registers */
+static unsigned char *mmio0_ptr = 0, *mmio1_ptr = 0;    // mmio pointer
+static unsigned long long mmio0_start, mmio0_end, mmio0_flags, mmio0_len;
+static unsigned long long mmio1_start, mmio1_end, mmio1_flags, mmio1_len;
 unsigned long long *reg_counter;
 unsigned long long *reg_lap1, *reg_lap2;
+
+/* procfs */
+struct proc_dir_entry *ep_proc_root;    // proc root dir
+
+/* ethpipe */
+static int buf_pos = 0;
 
 /* tmp */
 unsigned long long counter_data = 9999;
@@ -172,7 +186,7 @@ static struct file_operations ep_fops = {
 
 static struct miscdevice ep_misc_device = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name  = EP_DEV_DIR,
+	.name  = DRV_NAME,
 	.fops  = &ep_fops,
 };
 
@@ -180,17 +194,65 @@ static struct miscdevice ep_misc_device = {
  * ep_init_one
  *
  **/
-static int ep_init_one(void)
+static int ep_init_one(struct pci_dev *pdev,
+				const struct pci_device_id *ent)
 {
 	static char devname[16];
 	static int board_idx = -1;
 	int ret;
 
+	pr_info( "%s\n", __func__ );
+
+	mmio0_ptr = 0;
+	mmio1_ptr = 0;
+
+	/* attach PCI device */
+	ret = pci_enable_device(pdev);
+	if (ret)
+		goto err;
+	ret = pci_request_regions(pdev, DRV_NAME);
+	if (ret)
+		goto err;
+
 	++board_idx;
 	pr_info( "board_idx: %d\n", board_idx );
 
+	/* PCI mmio0 pointers */
+	mmio0_start = pci_resource_start(pdev, 0);
+	mmio0_end   = pci_resource_end(pdev, 0);
+	mmio0_flags = pci_resource_flags(pdev, 0);
+	mmio0_len   = pci_resource_len(pdev, 0);
+
+	pr_info( "mmio0_start: %X\n", (unsigned int)mmio0_start );
+	pr_info( "mmio0_end  : %X\n", (unsigned int)mmio0_end );
+	pr_info( "mmio0_flags: %X\n", (unsigned int)mmio0_flags );
+	pr_info( "mmio0_len  : %X\n", (unsigned int)mmio0_len );
+
+	mmio0_ptr = ioremap(mmio0_start, mmio0_len);
+	if (!mmio0_ptr) {
+		pr_warn( "cannot ioremap mmio0 base\n" );
+		goto err;
+	}
+
+	/* PCI mmio1 pointers */
+	mmio1_start = pci_resource_start(pdev, 2);
+	mmio1_end   = pci_resource_end(pdev, 2);
+	mmio1_flags = pci_resource_flags(pdev, 2);
+	mmio1_len   = pci_resource_len(pdev, 2);
+
+	pr_info( "mmio1_start: %X\n", (unsigned int)mmio1_start );
+	pr_info( "mmio1_end  : %X\n", (unsigned int)mmio1_end );
+	pr_info( "mmio1_flags: %X\n", (unsigned int)mmio1_flags );
+	pr_info( "mmio1_len  : %X\n", (unsigned int)mmio1_len );
+
+	mmio1_ptr = ioremap_wc(mmio1_start, mmio1_len);
+	if (!mmio1_ptr) {
+		pr_warn( "cannot ioremap mmio1 base\n" );
+		goto err;
+	}
+
 	/* register ethpipe character device */
-	sprintf( devname, "%s/%d", EP_DEV_DIR, board_idx );
+	sprintf( devname, "%s/%d", DRV_NAME, board_idx );
 	ep_misc_device.name = devname;
 	ret = misc_register(&ep_misc_device);
 	if (ret) {
@@ -199,10 +261,37 @@ static int ep_init_one(void)
 	}
 
 	return 0;
+
+err:
+	pci_release_regions(pdev);
+	pci_disable_device(pdev);
+	return -1;
 }
 
 /**
- * ep_init_module
+ * ep_remove_one
+ *
+ **/
+static void ep_remove_one (struct pci_dev *pdev)
+{
+	pr_info("%s\n", __func__);
+
+	/* disable interrupts */
+
+	/* detach pci device */
+	pci_release_regions(pdev);
+	pci_disable_device(pdev);
+}
+
+static struct pci_driver ep_pci_driver = {
+	.name     = DRV_NAME,
+	.id_table = ep_pci_tbl,
+	.probe    = ep_init_one,
+	.remove   = ep_remove_one,
+};
+
+/**
+ * ep_init
  *
  **/
 static int __init ep_init(void)
@@ -219,9 +308,9 @@ static int __init ep_init(void)
 
 	/* register ethpipe procfs entries */
 	// dir: /proc/ethpipe
-	ep_proc_root = proc_mkdir(EP_PROC_DIR, NULL);
+	ep_proc_root = proc_mkdir(DRV_NAME, NULL);
 	if (!ep_proc_root) {
-		pr_warn("cannot create /proc/%s\n", EP_PROC_DIR);
+		pr_warn("cannot create /proc/%s\n", DRV_NAME);
 		return -ENODEV;
 	}
 	// proc file: /proc/ethpipe/counter
@@ -246,7 +335,7 @@ static int __init ep_init(void)
 		goto remove_lap2;
 	}
 
-	return ep_init_one();
+	return pci_register_driver(&ep_pci_driver);
 
 remove_lap2:
 	remove_proc_entry("lap2", ep_proc_root);
@@ -254,7 +343,7 @@ remove_lap1:
 	remove_proc_entry("lap1", ep_proc_root);
 remove_counter:
 	remove_proc_entry("counter", ep_proc_root);
-	remove_proc_entry(EP_PROC_DIR, NULL);
+	remove_proc_entry(DRV_NAME, NULL);
 	return ret;
 }
 
@@ -266,11 +355,12 @@ static void __exit ep_cleanup(void)
 {
 	printk("%s\n", __func__);
 	misc_deregister(&ep_misc_device);
+	pci_unregister_driver(&ep_pci_driver);
 
 	remove_proc_entry("lap2", ep_proc_root);
 	remove_proc_entry("lap1", ep_proc_root);
 	remove_proc_entry("counter", ep_proc_root);
-	remove_proc_entry(EP_PROC_DIR, NULL);
+	remove_proc_entry(DRV_NAME, NULL);
 }
 
 module_init(ep_init);
