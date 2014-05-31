@@ -205,24 +205,28 @@ static int ep_init_one(void)
 	}
 
 	/* register ethpipe procfs entries */
-	ep_proc_root = proc_mkdir(EP_PROC_DIR, NULL);    // proc root dir
+	// dir: /proc/ethpipe
+	ep_proc_root = proc_mkdir(EP_PROC_DIR, NULL);
 	if (!ep_proc_root) {
 		pr_warn("cannot create /proc/%s\n", EP_PROC_DIR);
 		return -ENODEV;
 	}
-	pe_counter = proc_create("counter", 0666, ep_proc_root, &proc_counter_fops);    // counter
+	// proc file: /proc/ethpipe/counter
+	pe_counter = proc_create("counter", 0666, ep_proc_root, &proc_counter_fops);
 	if (pe_counter == NULL) {
 		pr_err("cannot create %s procfs entry\n", "counter");
 		ret = -EINVAL;
 		goto remove_counter;
 	}
-	pe_lap1 = proc_create("lap1", 0666, ep_proc_root, &proc_lap1_fops);    // lap1
+	// proc file: /proc/ethpipe/lap1
+	pe_lap1 = proc_create("lap1", 0666, ep_proc_root, &proc_lap1_fops);
 	if (pe_lap1 == NULL) {
 		pr_err("cannot create %s procfs entry\n", "lap1");
 		ret = -EINVAL;
 		goto remove_lap1;
 	}
-	pe_lap2 = proc_create("lap2", 0666, ep_proc_root, &proc_lap2_fops);    // lap2
+	// proc file: /proc/ethpipe/lap2
+	pe_lap2 = proc_create("lap2", 0666, ep_proc_root, &proc_lap2_fops);
 	if (pe_lap2 == NULL) {
 		pr_err("cannot create %s procfs entry\n", "lap2");
 		ret = -EINVAL;
