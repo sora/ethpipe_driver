@@ -39,7 +39,8 @@ int counter_tmp, lap1_tmp, lap2_tmp;
  * procfs handle functions
  *
  **/
-static ssize_t counter_show( struct file *file, char *buf, size_t count, loff_t *ppos )
+static ssize_t counter_show( struct file *file, char *buf, size_t count,
+				loff_t *ppos )
 {
   if (debug)
     printk("%s\n", __func__);
@@ -48,7 +49,8 @@ static ssize_t counter_show( struct file *file, char *buf, size_t count, loff_t 
   return count;
 }
 
-static ssize_t lap1_show( struct file *file, char *buf, size_t count, loff_t *ppos )
+static ssize_t lap1_show( struct file *file, char *buf, size_t count,
+				loff_t *ppos )
 {
   if (debug)
     printk("%s\n", __func__);
@@ -66,7 +68,8 @@ static ssize_t lap1_store(struct file *file, const char __user *buf,
   return count;
 }
 
-static ssize_t lap2_show( struct file *file, char *buf, size_t count, loff_t *ppos )
+static ssize_t lap2_show( struct file *file, char *buf, size_t count,
+				loff_t *ppos )
 {
   if (debug)
     printk("%s\n", __func__);
@@ -114,7 +117,8 @@ static int ep_open(struct inode *inode, struct file *file)
  * ep_write
  *
  **/
-static ssize_t ep_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+static ssize_t ep_write(struct file *file, const char __user *buf,
+				size_t count, loff_t *ppos)
 {
 	unsigned int copy_len = 0;
 	static unsigned char pkt[EP_HDR_LEN+MAX_PKT_LEN] = {0};
@@ -271,3 +275,4 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION(VERSION);
 module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debug mode");
+
