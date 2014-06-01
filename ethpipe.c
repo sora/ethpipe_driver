@@ -27,7 +27,7 @@ static int debug = 1;
 
 /* pci parameters */
 static DEFINE_PCI_DEVICE_TABLE(ep_pci_tbl) = {
-	{ 0x3776, 0x8081, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ 0x3776, 0x8001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, ep_pci_tbl);
