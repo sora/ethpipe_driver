@@ -14,6 +14,8 @@
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 
+#include <linux/version.h>
+
 
 #define VERSION "0.3.0"
 #define DRV_NAME "ethpipe"
@@ -21,6 +23,13 @@
 #define MAX_PKT_LEN	(9014)
 #define EP_HDR_LEN	(14)
 #define MAX_BUF_LEN	(32)
+
+/* support old Linux version */
+#if LINUX_VERSION_CODE > KERNEL_VERSION(3,8,0)
+#define __devinit
+#define __devexit
+#define __devexit_p
+#endif
 
 /* module parameters */
 static int debug = 1;
@@ -227,7 +236,7 @@ lend:
  * ep_init_one
  *
  **/
-static int ep_init_one(struct pci_dev *pdev,
+static int __devinit ep_init_one(struct pci_dev *pdev,
 				const struct pci_device_id *ent)
 {
 	static char devname[16];
@@ -310,7 +319,7 @@ err:
  * ep_remove_one
  *
  **/
-static void ep_remove_one (struct pci_dev *pdev)
+static void __devexit ep_remove_one(struct pci_dev *pdev)
 {
 	pr_info("%s\n", __func__);
 
@@ -327,7 +336,7 @@ static struct pci_driver ep_pci_driver = {
 	.name     = DRV_NAME,
 	.id_table = ep_pci_tbl,
 	.probe    = ep_init_one,
-	.remove   = ep_remove_one,
+	.remove   = __devexit_p(ep_remove_one),
 };
 
 /**
