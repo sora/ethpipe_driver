@@ -23,7 +23,6 @@
 #define MAX_PKT_LEN	(9014)
 #define EP_HDR_LEN	(14)
 #define MAX_BUF_LEN	(32)
-#define DMA_BUF_MAX	(1024*1024)
 
 /* support old Linux version */
 #if LINUX_VERSION_CODE > KERNEL_VERSION(3,8,0)
@@ -293,12 +292,6 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 		pr_warn( "cannot ioremap mmio1 base\n" );
 		goto err;
 	}
-
-	// DMA setup (tmp)
-	*(long *)(mmio0_ptr + 0x80) = 1;
-	*(long *)(mmio0_ptr + 0x84) = 0xffffffff;
-	*(long *)(mmio0_ptr + 0x14) = DMA_BUF_MAX;
-	*(mmio0_ptr + 0x10) = 0x3;
 
 	/* register ethpipe character device */
 	sprintf( devname, "%s/%d", DRV_NAME, board_idx );
