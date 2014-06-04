@@ -73,7 +73,7 @@ static ssize_t counter_show( struct file *file, char *buf, size_t count,
 {
 	if (debug)
 		pr_info("%s\n", __func__);
-	
+
 	sprintf(buf, "%llX\n", *reg_counter);
 	return count;
 }
@@ -83,7 +83,7 @@ static ssize_t lap1_show( struct file *file, char *buf, size_t count,
 {
 	if (debug)
 		pr_info("%s\n", __func__);
-	
+
 	return sprintf(buf, "%llX\n", *reg_lap1);
 }
 
@@ -92,7 +92,7 @@ static ssize_t lap1_store(struct file *file, const char __user *buf,
 {
 	if (debug)
 		pr_info("%s\n", __func__);
-	
+
 	sscanf(buf, "%llX", reg_lap1);
 	return count;
 }
@@ -102,7 +102,7 @@ static ssize_t lap2_show( struct file *file, char *buf, size_t count,
 {
 	if (debug)
 		pr_info("%s\n", __func__);
-	
+
 	return sprintf(buf, "%llX\n", *reg_lap2);
 }
 
@@ -171,7 +171,7 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 
 	if (debug) {
 		pr_info( KERN_INFO "buf_pos = %d\n", buf_pos );
-	
+
 		pr_info( "DEBUG: pkt = %02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x\n",
 			pkt[ 0], pkt[ 1], pkt[ 2], pkt[ 3], pkt[ 4], pkt[ 5], pkt[ 6], pkt[ 7],
 			pkt[ 8], pkt[ 9], pkt[10], pkt[11] );
@@ -430,6 +430,7 @@ static void __exit ep_cleanup(void)
 
 	/* workqueue */
 	if (ep_wq) {
+		flush_workqueue(eq_wq);
 		destroy_workqueue(ep_wq);
 		ep_wq = NULL;
 	}
@@ -450,4 +451,3 @@ MODULE_LICENSE("GPL");
 MODULE_VERSION(VERSION);
 module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debug mode");
-
