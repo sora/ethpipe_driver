@@ -14,15 +14,16 @@
 #include <linux/interrupt.h>
 #include <linux/workqueue.h>
 
+#include <linux/string.h>
 #include <linux/version.h>
 
 
 #define VERSION "0.3.0"
 #define DRV_NAME "ethpipe"
 
-#define MAX_PKT_LEN	(9014)
-#define EP_HDR_LEN	(14)
-#define MAX_BUF_LEN	(32)
+/* PCIe MMIO_0 Mapped Memory Address Table */
+#define TX_WR_PTR_ADDR	(0x30)
+#define TX_RD_PTR_ADDR	(0x34)
 
 /* support old Linux version */
 #if LINUX_VERSION_CODE > KERNEL_VERSION(3,8,0)
@@ -55,14 +56,14 @@ struct work_struct work1;
 /* procfs */
 struct proc_dir_entry *ep_proc_root;    // proc root dir
 
-/* ethpipe */
-static int buf_pos = 0;
+/* sender */
+static int *sender_wr_ptr, *sender_rd_ptr;
+static int tx_wr_ptr;
 
 /* tmp */
 unsigned long long counter_data = 9999;
 unsigned long long lap1_data = 1111;
 unsigned long long lap2_data = 2222;
-int counter_tmp, lap1_tmp, lap2_tmp;
 
 /**
  * procfs handle functions
@@ -142,6 +143,31 @@ static int ep_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static const unsigned char pkt[] = {
+	// ethpipe header
+	0x00, 0x3c,                                      /* pktlen */
+	0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
+	// ethernet header
+	0x00, 0x21, 0x6a, 0x05, 0xf5, 0x2c,              /* dst mac */
+	0x00, 0x24, 0x17, 0xa3, 0xf4, 0x73,              /* src mac */
+	0x80, 0x00,                                      /* proto type */
+	// IPv4 header
+	0x45, 0x00, 0x00, 0x2e,                          /*  */
+	0xdf, 0x2e, 0x00, 0x00,                          /*  */
+	0x6e, 0x11, 0x80, 0xd7,                          /*  */
+	0x18, 0x22, 0x12, 0xaa,                          /* src IP addr */
+	0xc0, 0xa8, 0x01, 0x45,                          /* dst IP addr */
+	// UDP header
+	0xc4, 0x98, 0xf3, 0xb2,                          /*  */
+	0x00, 0x1a, 0x83, 0xfb,                          /*  */
+	// payload
+	0x02, 0xca, 0x02, 0x38, 0xd0, 0x25, 0x0a, 0x2f,
+	0x63, 0x3b, 0x37, 0xfc, 0x47, 0xf3, 0xd4, 0x46,
+	0x3f, 0xf1
+};
+static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
+
 /**
  * ep_write
  *
@@ -150,34 +176,66 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	unsigned int copy_len = 0;
-	static unsigned char pkt[EP_HDR_LEN+MAX_PKT_LEN] = {0};
+	int tx_rd_ptr;
+	int tx_free;
+	int piece;
 
 	if (debug)
 		pr_info("%s\n", __func__);
 
-	if (count > (MAX_BUF_LEN - buf_pos)) {
-		copy_len = MAX_BUF_LEN - buf_pos;
+	if (debug) {
+		pr_info( "before\n" );
+		pr_info( "count: %d\n", count);
+		pr_info( "copy_len: %d\n", copy_len);
+		pr_info( "tx_rd_ptr: 0\n" );
+		pr_info( "tx_wr_ptr: %d\n", tx_wr_ptr);
+		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
+		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
+	}
+
+	// tx_rd_ptr
+	tx_rd_ptr = *sender_rd_ptr << 1;
+
+	// mmio1 free space
+	if (tx_rd_ptr < tx_wr_ptr) {
+		tx_free = tx_wr_ptr - tx_rd_ptr;
 	} else {
-		copy_len = count;
+		tx_free = (tx_wr_ptr - tx_rd_ptr) + (mmio1_len >> 1);
 	}
 
-	if ( copy_from_user( pkt+buf_pos, buf, copy_len )) {
-		pr_info( KERN_INFO "copy_from_user failed\n" );
-		return -EFAULT;
+	// copy_len
+	if (pktlen < tx_free) {
+		copy_len = pktlen;
+	} else {
+		copy_len = tx_free;
 	}
 
-	*ppos += copy_len;
-	buf_pos += copy_len;
+	// copy pkt data to NIC board
+	if ( (tx_wr_ptr + pktlen) < (mmio1_len >> 1) ) {
+		memcpy(mmio1_ptr + tx_wr_ptr, pkt, pktlen);
+	} else {
+		piece = (mmio1_len >> 1) - tx_wr_ptr;
+		memcpy(mmio1_ptr + tx_wr_ptr, pkt, piece);
+		memcpy(mmio1_ptr, pkt + piece, pktlen - piece);
+	}
+
+	tx_wr_ptr += (pktlen + 1) & 0xfffffffe;
+	tx_wr_ptr &= ((mmio1_len >> 1) - 1);
+
+	// update sender_wr_ptr
+	*sender_wr_ptr = tx_wr_ptr >> 1;
 
 	if (debug) {
-		pr_info( KERN_INFO "buf_pos = %d\n", buf_pos );
-
-		pr_info( "DEBUG: pkt = %02x%02x%02x%02x%02x%02x %02x%02x%02x%02x%02x%02x\n",
-			pkt[ 0], pkt[ 1], pkt[ 2], pkt[ 3], pkt[ 4], pkt[ 5], pkt[ 6], pkt[ 7],
-			pkt[ 8], pkt[ 9], pkt[10], pkt[11] );
+		pr_info( "after\n" );
+		pr_info( "count: %d\n", count);
+		pr_info( "copy_len: %d\n", copy_len);
+		pr_info( "tx_rd_ptr: %d\n", tx_rd_ptr);
+		pr_info( "tx_wr_ptr: %d\n", tx_wr_ptr);
+		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
+		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
 	}
 
-	return count;
+	return copy_len;
 }
 
 /**
@@ -259,7 +317,7 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 	++board_idx;
 	pr_info( "board_idx: %d\n", board_idx );
 
-	/* PCI mmio0 pointers */
+	/* PCI mmio0 setup */
 	mmio0_start = pci_resource_start(pdev, 0);
 	mmio0_end   = pci_resource_end(pdev, 0);
 	mmio0_flags = pci_resource_flags(pdev, 0);
@@ -276,7 +334,7 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 		goto err;
 	}
 
-	/* PCI mmio1 pointers */
+	/* PCI mmio1 setup */
 	mmio1_start = pci_resource_start(pdev, 2);
 	mmio1_end   = pci_resource_end(pdev, 2);
 	mmio1_flags = pci_resource_flags(pdev, 2);
@@ -302,9 +360,23 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 		return ret;
 	}
 
+	/* NIC TX pointer */
+	sender_wr_ptr = (int *)(mmio0_ptr + TX_WR_PTR_ADDR);
+	sender_rd_ptr = (int *)(mmio0_ptr + TX_RD_PTR_ADDR);
+
+	pr_info( "sender_wr_ptr: %X\n", *sender_wr_ptr );
+	pr_info( "sender_r_ptr: %X\n", *sender_rd_ptr );
+
+	*sender_wr_ptr = *sender_rd_ptr;    // clear TX queue write pointer
+	tx_wr_ptr = *sender_wr_ptr << 1;
+
 	/* interrupt handler */
 	if (request_irq( pdev->irq, ep_interrupt, IRQF_SHARED, DRV_NAME, pdev)) {
 		pr_warn( "cannot request_irq\n" );
+	}
+
+	if (debug) {
+		pr_info( "pktlen: %d\n", (int)pktlen );
 	}
 
 	return 0;
@@ -381,6 +453,7 @@ static int __init ep_init(void)
 		pr_warn("cannot create /proc/%s\n", DRV_NAME);
 		return -ENODEV;
 	}
+
 	// proc file: /proc/ethpipe/counter
 	pe_counter = proc_create("counter", 0666, ep_proc_root, &proc_counter_fops);
 	if (pe_counter == NULL) {
@@ -430,7 +503,7 @@ static void __exit ep_cleanup(void)
 
 	/* workqueue */
 	if (ep_wq) {
-		flush_workqueue(eq_wq);
+		flush_workqueue(ep_wq);
 		destroy_workqueue(ep_wq);
 		ep_wq = NULL;
 	}
