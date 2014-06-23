@@ -46,8 +46,6 @@ MODULE_DEVICE_TABLE(pci, ep_pci_tbl);
 static unsigned char *mmio0_ptr = 0, *mmio1_ptr = 0;    // mmio pointer
 static unsigned long long mmio0_start, mmio0_end, mmio0_flags, mmio0_len;
 static unsigned long long mmio1_start, mmio1_end, mmio1_flags, mmio1_len;
-unsigned long long *reg_counter;
-unsigned long long *reg_lap1, *reg_lap2;
 
 /* workqueue */
 static struct workqueue_struct *ep_wq;
@@ -56,36 +54,49 @@ struct work_struct work1;
 /* procfs */
 struct proc_dir_entry *ep_proc_root;    // proc root dir
 
-/* sender */
-static int *sender_wr_ptr, *sender_rd_ptr;
-static int tx_wr_ptr;
+/* scheduled transmission */
+static unsigned long long *counter125;
+static unsigned long long *lap1, *lap2;
 
-/* tmp */
-unsigned long long counter_data = 9999;
-unsigned long long lap1_data = 1111;
-unsigned long long lap2_data = 2222;
+/* sender */
+static int *sender_wr_ptr, *sender_rd_ptr;    // NIC TX pointer
+
+/* tx ring buffer */
+#if 0
+struct _pbuf_tx {
+	unsigned char *tx_start_ptr;
+	unsigned char *tx_end_ptr;
+	unsigned char *tx_wr_ptr;
+	unsigned char *tx_rd_ptr;
+} static pbuf_tx0 = {0};
+#endif
 
 /**
  * procfs handle functions
  *
  **/
-static ssize_t counter_show( struct file *file, char *buf, size_t count,
+static ssize_t counter125_show( struct file *file, char *buf, size_t count,
 				loff_t *ppos )
 {
-	if (debug)
-		pr_info("%s\n", __func__);
+	int len = 0;
 
-	sprintf(buf, "%llX\n", *reg_counter);
-	return count;
+	if (debug)
+		pr_info("%s\t%d\n", __func__, (int)count);
+
+	len = sprintf(buf, "%llX\n", *counter125);
+	return len;
 }
 
 static ssize_t lap1_show( struct file *file, char *buf, size_t count,
 				loff_t *ppos )
 {
+	int len;
+
 	if (debug)
 		pr_info("%s\n", __func__);
 
-	return sprintf(buf, "%llX\n", *reg_lap1);
+	len = sprintf(buf, "%llX\n", *lap1);
+	return len;
 }
 
 static ssize_t lap1_store(struct file *file, const char __user *buf,
@@ -94,17 +105,20 @@ static ssize_t lap1_store(struct file *file, const char __user *buf,
 	if (debug)
 		pr_info("%s\n", __func__);
 
-	sscanf(buf, "%llX", reg_lap1);
+	sscanf(buf, "%llX", lap1);
 	return count;
 }
 
 static ssize_t lap2_show( struct file *file, char *buf, size_t count,
 				loff_t *ppos )
 {
+	int len;
+
 	if (debug)
 		pr_info("%s\n", __func__);
 
-	return sprintf(buf, "%llX\n", *reg_lap2);
+	len = sprintf(buf, "%llX\n", *lap2);
+	return len;
 }
 
 static ssize_t lap2_store(struct file *file, const char __user *buf,
@@ -113,12 +127,12 @@ static ssize_t lap2_store(struct file *file, const char __user *buf,
 	if (debug)
 		pr_info("%s\n", __func__);
 
-	sscanf(buf, "%llX", reg_lap2);
+	sscanf(buf, "%llX", lap2);
 	return count;
 }
 
-static const struct file_operations proc_counter_fops = {
-	.read = counter_show,
+static const struct file_operations proc_counter125_fops = {
+	.read = counter125_show,
 };
 
 static const struct file_operations proc_lap1_fops = {
@@ -143,6 +157,7 @@ static int ep_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+#if 0
 static const unsigned char pkt[] = {
 	// ethpipe header
 	0x00, 0x3c,                                      /* pktlen */
@@ -166,6 +181,34 @@ static const unsigned char pkt[] = {
 	0x63, 0x3b, 0x37, 0xfc, 0x47, 0xf3, 0xd4, 0x46,
 	0x3f, 0xf1
 };
+#endif
+
+static const unsigned char pkt[] = {
+	// ethpipe header
+	0x00, 0x5c,                                      /* pktlen */
+	0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
+	// ethernet header
+	0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
+	0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
+	0x08, 0x00,
+	// IPv4 header
+	0x45, 0x00, 0x00, 0x4e,
+	0x00, 0x00, 0x40, 0x00,
+	0x40, 0x11, 0xfb, 0x32,
+	0x0a, 0x00, 0x00, 0x6e,
+	0x0a, 0x00, 0x00, 0x02,
+	// payload
+	0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
+	0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
+	0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
+	0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
+	0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
+	0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
+	0x00, 0x01
+};
+
 static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
 
 /**
@@ -176,7 +219,8 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
 	unsigned int copy_len = 0;
-	int tx_rd_ptr;
+	unsigned int sender_rd_ptr_tmp = 0;
+	unsigned int sender_wr_ptr_tmp = 0;
 	int tx_free;
 	int piece;
 
@@ -185,22 +229,23 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 
 	if (debug) {
 		pr_info( "before\n" );
-		pr_info( "count: %d\n", count);
-		pr_info( "copy_len: %d\n", copy_len);
-		pr_info( "tx_rd_ptr: 0\n" );
-		pr_info( "tx_wr_ptr: %d\n", tx_wr_ptr);
-		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
-		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
+		pr_info( "count: %d\n", (int)count );
+		pr_info( "copy_len: %d\n", copy_len );
+		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp );
+		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp );
+		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
+		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr );
 	}
 
-	// tx_rd_ptr
-	tx_rd_ptr = *sender_rd_ptr << 1;
+	// sender_rd_ptr_tmp
+	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
+	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
 
 	// mmio1 free space
-	if (tx_rd_ptr < tx_wr_ptr) {
-		tx_free = tx_wr_ptr - tx_rd_ptr;
+	if (sender_rd_ptr_tmp < sender_wr_ptr_tmp) {
+		tx_free = sender_wr_ptr_tmp - sender_rd_ptr_tmp;
 	} else {
-		tx_free = (tx_wr_ptr - tx_rd_ptr) + (mmio1_len >> 1);
+		tx_free = (sender_wr_ptr_tmp - sender_rd_ptr_tmp) + (mmio1_len >> 1);
 	}
 
 	// copy_len
@@ -211,26 +256,26 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 	}
 
 	// copy pkt data to NIC board
-	if ( (tx_wr_ptr + pktlen) < (mmio1_len >> 1) ) {
-		memcpy(mmio1_ptr + tx_wr_ptr, pkt, pktlen);
+	if ( (sender_wr_ptr_tmp + pktlen) < (mmio1_len >> 1) ) {
+		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, pktlen);
 	} else {
-		piece = (mmio1_len >> 1) - tx_wr_ptr;
-		memcpy(mmio1_ptr + tx_wr_ptr, pkt, piece);
+		piece = (mmio1_len >> 1) - sender_wr_ptr_tmp;
+		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, piece);
 		memcpy(mmio1_ptr, pkt + piece, pktlen - piece);
 	}
 
-	tx_wr_ptr += (pktlen + 1) & 0xfffffffe;
-	tx_wr_ptr &= ((mmio1_len >> 1) - 1);
+	sender_wr_ptr_tmp += (pktlen + 1) & 0xfffffffe;
+	sender_wr_ptr_tmp &= ((mmio1_len >> 1) - 1);
 
 	// update sender_wr_ptr
-	*sender_wr_ptr = tx_wr_ptr >> 1;
+	*sender_wr_ptr = sender_wr_ptr_tmp >> 1;
 
 	if (debug) {
 		pr_info( "after\n" );
-		pr_info( "count: %d\n", count);
+		pr_info( "count: %d\n", (int)count);
 		pr_info( "copy_len: %d\n", copy_len);
-		pr_info( "tx_rd_ptr: %d\n", tx_rd_ptr);
-		pr_info( "tx_wr_ptr: %d\n", tx_wr_ptr);
+		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp);
+		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp);
 		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
 		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
 	}
@@ -272,6 +317,10 @@ static irqreturn_t ep_interrupt(int irq, void *pdev)
 	int status, handled = 0;
 
 	status = *(mmio0_ptr + 0x10);
+
+	if (debug) {
+		pr_info( "Got a interrupt: status=%d\n", status );
+	}
 
 	// is ethpipe interrupt?
 	if ( (status & 8) == 0 ) {
@@ -364,11 +413,23 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 	sender_wr_ptr = (int *)(mmio0_ptr + TX_WR_PTR_ADDR);
 	sender_rd_ptr = (int *)(mmio0_ptr + TX_RD_PTR_ADDR);
 
-	pr_info( "sender_wr_ptr: %X\n", *sender_wr_ptr );
-	pr_info( "sender_r_ptr: %X\n", *sender_rd_ptr );
+	if (debug) {
+		pr_info( "sender_wr_ptr: %X\n", *sender_wr_ptr );
+		pr_info( "sender_r_ptr: %X\n", *sender_rd_ptr );
+	}
 
 	*sender_wr_ptr = *sender_rd_ptr;    // clear TX queue write pointer
-	tx_wr_ptr = *sender_wr_ptr << 1;
+
+	/* scheduled transmission */
+	counter125 = (unsigned long long *)(mmio0_ptr + 0x4);
+	lap1 = (unsigned long long *)(mmio0_ptr + 0x100);
+	lap2 = (unsigned long long *)(mmio0_ptr + 0x108);
+
+	if (debug) {
+		pr_info( "counter125: %X\n", *(unsigned int *)counter125 );
+		pr_info( "lap1: %X\n", *(unsigned int *)lap1 );
+		pr_info( "lap2: %X\n", *(unsigned int *)lap2 );
+	}
 
 	/* interrupt handler */
 	if (request_irq( pdev->irq, ep_interrupt, IRQF_SHARED, DRV_NAME, pdev)) {
@@ -427,15 +488,10 @@ void work_body(struct work_struct *work)
  **/
 static int __init ep_init(void)
 {
-	struct proc_dir_entry *pe_counter, *pe_lap1, *pe_lap2;
+	struct proc_dir_entry *pe_counter125, *pe_lap1, *pe_lap2;
 	int ret;
 
 	pr_info("%s\n", __func__);
-
-	/* tmp */
-	reg_counter = &counter_data;
-	reg_lap1 = &lap1_data;
-	reg_lap2 = &lap2_data;
 
 	/* workqueue */
 	ep_wq = alloc_workqueue("ethpipe", WQ_UNBOUND, 0);
@@ -455,11 +511,12 @@ static int __init ep_init(void)
 	}
 
 	// proc file: /proc/ethpipe/counter
-	pe_counter = proc_create("counter", 0666, ep_proc_root, &proc_counter_fops);
-	if (pe_counter == NULL) {
-		pr_err("cannot create %s procfs entry\n", "counter");
+	pe_counter125 = proc_create("counter125", 0666, ep_proc_root,
+				&proc_counter125_fops);
+	if (pe_counter125 == NULL) {
+		pr_err("cannot create %s procfs entry\n", "counter125");
 		ret = -EINVAL;
-		goto remove_counter;
+		goto remove_counter125;
 	}
 	// proc file: /proc/ethpipe/lap1
 	pe_lap1 = proc_create("lap1", 0666, ep_proc_root, &proc_lap1_fops);
@@ -482,8 +539,8 @@ remove_lap2:
 	remove_proc_entry("lap2", ep_proc_root);
 remove_lap1:
 	remove_proc_entry("lap1", ep_proc_root);
-remove_counter:
-	remove_proc_entry("counter", ep_proc_root);
+remove_counter125:
+	remove_proc_entry("counter125", ep_proc_root);
 	remove_proc_entry(DRV_NAME, NULL);
 out:
 	return ret;
@@ -511,7 +568,7 @@ static void __exit ep_cleanup(void)
 	/* procfs */
 	remove_proc_entry("lap2", ep_proc_root);
 	remove_proc_entry("lap1", ep_proc_root);
-	remove_proc_entry("counter", ep_proc_root);
+	remove_proc_entry("counter125", ep_proc_root);
 	remove_proc_entry(DRV_NAME, NULL);
 }
 
