@@ -25,6 +25,9 @@
 #define TX_WR_PTR_ADDR	(0x30)
 #define TX_RD_PTR_ADDR	(0x34)
 
+/* buffer size */
+#define RING_BUF_MAX	  (1024*1024*1)
+
 /* support old Linux version */
 #if LINUX_VERSION_CODE > KERNEL_VERSION(3,8,0)
 #define __devinit
@@ -61,15 +64,13 @@ static unsigned long long *lap1, *lap2;
 /* sender */
 static int *sender_wr_ptr, *sender_rd_ptr;    // NIC TX pointer
 
-/* tx ring buffer */
-#if 0
+/* ring buffer */
 struct _pbuf_tx {
 	unsigned char *tx_start_ptr;
 	unsigned char *tx_end_ptr;
 	unsigned char *tx_wr_ptr;
 	unsigned char *tx_rd_ptr;
-} static pbuf_tx0 = {0};
-#endif
+} static pbuf0 = {0};
 
 /**
  * procfs handle functions
@@ -255,6 +256,9 @@ static ssize_t ep_write(struct file *file, const char __user *buf,
 		copy_len = tx_free;
 	}
 
+	// Userspace to kernel TX buffer
+
+
 	// copy pkt data to NIC board
 	if ( (sender_wr_ptr_tmp + pktlen) < (mmio1_len >> 1) ) {
 		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, pktlen);
@@ -420,6 +424,15 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 
 	*sender_wr_ptr = *sender_rd_ptr;    // clear TX queue write pointer
 
+	/* ring buffer */
+	if ( ( pbuf0.tx_start_ptr = kmalloc(RING_BUF_MAX, GFP_KERNEL) ) == 0 ) {
+		pr_err( "Fail to kmalloc: pbuf0.tx_start_ptr\n" );
+		goto err;
+	}
+	pbuf0.tx_end_ptr = pbuf0.tx_start_ptr + RING_BUF_MAX - 1;
+	pbuf0.tx_wr_ptr  = pbuf0.tx_start_ptr;
+	pbuf0.tx_rd_ptr  = pbuf0.tx_start_ptr;
+
 	/* scheduled transmission */
 	counter125 = (unsigned long long *)(mmio0_ptr + 0x4);
 	lap1 = (unsigned long long *)(mmio0_ptr + 0x100);
@@ -443,6 +456,11 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 	return 0;
 
 err:
+	if (pbuf0.tx_start_ptr) {
+		kfree(pbuf0.tx_start_ptr);
+		pbuf0.tx_start_ptr = NULL;
+	}
+
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
 	return -1;
@@ -459,6 +477,21 @@ static void __devexit ep_remove_one(struct pci_dev *pdev)
 	/* disable interrupts */
 	disable_irq(pdev->irq);
 	free_irq(pdev->irq, pdev);
+
+	if (mmio0_ptr) {
+		iounmap(mmio0_ptr);
+		mmio0_ptr = 0;
+	}
+
+	if (mmio1_ptr) {
+		iounmap(mmio1_ptr);
+		mmio1_ptr = 0;
+	}
+
+	if (pbuf0.tx_start_ptr) {
+		kfree(pbuf0.tx_start_ptr);
+		pbuf0.tx_start_ptr = NULL;
+	}
 
 	/* detach pci device */
 	pci_release_regions(pdev);
