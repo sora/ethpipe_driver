@@ -219,72 +219,13 @@ static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
 static ssize_t ep_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
-	unsigned int copy_len = 0;
-	unsigned int sender_rd_ptr_tmp = 0;
-	unsigned int sender_wr_ptr_tmp = 0;
-	int tx_free;
-	int piece;
-
 	if (debug)
 		pr_info("%s\n", __func__);
 
-	if (debug) {
-		pr_info( "before\n" );
-		pr_info( "count: %d\n", (int)count );
-		pr_info( "copy_len: %d\n", copy_len );
-		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp );
-		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp );
-		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
-		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr );
-	}
+	// schedule workqueue
+	queue_work(ep_wq, &work1);
 
-	// sender_rd_ptr_tmp
-	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
-	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
-
-	// mmio1 free space
-	if (sender_rd_ptr_tmp < sender_wr_ptr_tmp) {
-		tx_free = sender_wr_ptr_tmp - sender_rd_ptr_tmp;
-	} else {
-		tx_free = (sender_wr_ptr_tmp - sender_rd_ptr_tmp) + (mmio1_len >> 1);
-	}
-
-	// copy_len
-	if (pktlen < tx_free) {
-		copy_len = pktlen;
-	} else {
-		copy_len = tx_free;
-	}
-
-	// Userspace to kernel TX buffer
-
-
-	// copy pkt data to NIC board
-	if ( (sender_wr_ptr_tmp + pktlen) < (mmio1_len >> 1) ) {
-		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, pktlen);
-	} else {
-		piece = (mmio1_len >> 1) - sender_wr_ptr_tmp;
-		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, piece);
-		memcpy(mmio1_ptr, pkt + piece, pktlen - piece);
-	}
-
-	sender_wr_ptr_tmp += (pktlen + 1) & 0xfffffffe;
-	sender_wr_ptr_tmp &= ((mmio1_len >> 1) - 1);
-
-	// update sender_wr_ptr
-	*sender_wr_ptr = sender_wr_ptr_tmp >> 1;
-
-	if (debug) {
-		pr_info( "after\n" );
-		pr_info( "count: %d\n", (int)count);
-		pr_info( "copy_len: %d\n", copy_len);
-		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp);
-		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp);
-		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
-		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
-	}
-
-	return copy_len;
+	return count;
 }
 
 /**
@@ -332,9 +273,6 @@ static irqreturn_t ep_interrupt(int irq, void *pdev)
 	}
 
 	handled = 1;
-
-	// schedule workqueue
-	queue_work(ep_wq, &work1);
 
 	// clear interrupt flag
 	*(mmio0_ptr + 0x10) = status & 0xf7;
@@ -511,7 +449,68 @@ static struct pci_driver ep_pci_driver = {
  **/
 void work_body(struct work_struct *work)
 {
-	pr_info("%s\n", __func__);
+	unsigned int copy_len = 0;
+	unsigned int sender_rd_ptr_tmp = 0;
+	unsigned int sender_wr_ptr_tmp = 0;
+	int tx_free;
+	int piece;
+
+	if (debug)
+		pr_info("%s\n", __func__);
+
+	if (debug) {
+		pr_info( "before\n" );
+//		pr_info( "count: %d\n", (int)count );
+		pr_info( "copy_len: %d\n", copy_len );
+		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp );
+		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp );
+		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
+		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr );
+	}
+
+	// sender_rd_ptr_tmp
+	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
+	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
+
+	// mmio1 free space
+	if (sender_rd_ptr_tmp < sender_wr_ptr_tmp) {
+		tx_free = sender_wr_ptr_tmp - sender_rd_ptr_tmp;
+	} else {
+		tx_free = (sender_wr_ptr_tmp - sender_rd_ptr_tmp) + (mmio1_len >> 1);
+	}
+
+	// copy_len
+	if (pktlen < tx_free) {
+		copy_len = pktlen;
+	} else {
+		copy_len = tx_free;
+	}
+
+	// copy pkt data to NIC board
+	if ( (sender_wr_ptr_tmp + pktlen) < (mmio1_len >> 1) ) {
+		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, pktlen);
+	} else {
+		piece = (mmio1_len >> 1) - sender_wr_ptr_tmp;
+		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, piece);
+		memcpy(mmio1_ptr, pkt + piece, pktlen - piece);
+	}
+
+	sender_wr_ptr_tmp += (pktlen + 1) & 0xfffffffe;
+	sender_wr_ptr_tmp &= ((mmio1_len >> 1) - 1);
+
+	// update sender_wr_ptr
+	*sender_wr_ptr = sender_wr_ptr_tmp >> 1;
+
+	if (debug) {
+		pr_info( "after\n" );
+//		pr_info( "count: %d\n", (int)count);
+		pr_info( "copy_len: %d\n", copy_len);
+		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp);
+		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp);
+		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
+		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
+	}
+
 	return;
 }
 
