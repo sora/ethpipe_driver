@@ -36,7 +36,7 @@
 #endif
 
 /* module parameters */
-static int debug = 1;
+static int debug = 0;
 
 /* pci parameters */
 static DEFINE_PCI_DEVICE_TABLE(ep_pci_tbl) = {
