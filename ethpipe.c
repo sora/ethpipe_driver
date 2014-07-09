@@ -27,6 +27,8 @@
 #define TX_WR_PTR_ADDR	(0x30)
 #define TX_RD_PTR_ADDR	(0x34)
 
+#define EP_HDR_LEN	    (14)
+
 /* buffer size */
 #define RING_BUF_MAX	  (1024*1024*1)
 
@@ -65,10 +67,12 @@ static unsigned long long *lap1, *lap2;
 
 /* sender */
 static int *sender_wr_ptr, *sender_rd_ptr;    // NIC TX pointer
-static int sender_wr_ptr_tmp = 0, sender_rd_ptr_tmp = 0;
 
 /* wait queue */
 static wait_queue_head_t write_q;
+
+/* spinlock */
+static spinlock_t wq_spinlock;
 
 /* ring buffer */
 struct _pbuf_tx {
@@ -174,9 +178,7 @@ static ssize_t ep_read(struct file *file, char __user *buf, size_t count,
 	if (debug)
 		pr_info("%s\n", __func__);
 
-	// updates for
-	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
-	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
+	//sender_rd_ptr_tmp = *sender_rd_ptr << 1;
 
 	// fake interrupts
 	wake_up_interruptible( &write_q );
@@ -211,7 +213,7 @@ static const unsigned char pkt[] = {
 };
 #endif
 
-static const unsigned char pkt[] = {
+static const unsigned char data[] = {
 // ethpipe header
 0x00, 0x5c,                                      /* pktlen */
 0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
@@ -374,7 +376,79 @@ static const unsigned char pkt[] = {
 0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
 0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
 0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0X4E, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
+0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
+0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
+0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
+0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
+0x00, 0x01,
+
+// ethpipe header
+0x00, 0x5c,                                      /* pktlen */
+0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
+// ethernet header
+0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
+0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
+0x08, 0x00,
+// IPv4 header
+0x45, 0x00, 0x00, 0x4e,
+0x00, 0x00, 0x40, 0x00,
+0x40, 0x11, 0xfb, 0x32,
+0x0a, 0x00, 0x00, 0x6e,
+0x0a, 0x00, 0x00, 0x02,
+// payload
+0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
+0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
+0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
+0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
+0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
+0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
+0x00, 0x01,
+
+// ethpipe header
+0x00, 0x5c,                                      /* pktlen */
+0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
+// ethernet header
+0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
+0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
+0x08, 0x00,
+// IPv4 header
+0x45, 0x00, 0x00, 0x4e,
+0x00, 0x00, 0x40, 0x00,
+0x40, 0x11, 0xfb, 0x32,
+0x0a, 0x00, 0x00, 0x6e,
+0x0a, 0x00, 0x00, 0x02,
+// payload
+0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
+0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
+0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
+0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
+0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
+0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
+0x00, 0x01,
+
+// ethpipe header
+0x00, 0x5c,                                      /* pktlen */
+0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
+// ethernet header
+0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
+0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
+0x08, 0x00,
+// IPv4 header
+0x45, 0x00, 0x00, 0x4e,
+0x00, 0x00, 0x40, 0x00,
+0x40, 0x11, 0xfb, 0x32,
+0x0a, 0x00, 0x00, 0x6e,
+0x0a, 0x00, 0x00, 0x02,
+// payload
+0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
+0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
+0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
 0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
 0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
 0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
@@ -382,7 +456,7 @@ static const unsigned char pkt[] = {
 
 };
 
-static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
+static const unsigned short datalen = sizeof(data) / sizeof(data[0]);
 
 /**
  * ep_write
@@ -391,17 +465,68 @@ static const unsigned short pktlen = sizeof(pkt) / sizeof(pkt[0]);
 static ssize_t ep_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
+	unsigned int tx_free;
+
 	if (debug)
 		pr_info("%s\n", __func__);
 
+#if 0
 	// update sender_rd_ptr_tmp and sender_wr_ptr
 	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
 	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
 
-	if ( wait_event_interruptible( write_q,
-				(sender_rd_ptr_tmp == sender_wr_ptr_tmp) ) ) {
+	// mmio1 free space
+	if (sender_rd_ptr_tmp > sender_wr_ptr_tmp) {
+		tx_free = sender_rd_ptr_tmp - sender_wr_ptr_tmp;
+	} else {
+		tx_free = (sender_wr_ptr_tmp - sender_rd_ptr_tmp) + (mmio1_len >> 1);
+	}
+
+	if ( wait_event_interruptible( write_q, ( tx_free > (mmio1_len >> 3) ) ) ) {
+		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp );
+		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp );
+		pr_info( "sender_rd_ptr: %d\n", *sender_rd_ptr );
+		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
+
+		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
+		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
+		pr_info( "pbuf0.tx_start_ptr: %p\n", pbuf0.tx_start_ptr );
+		pr_info( "pbuf0.tx_end_ptr: %p\n", pbuf0.tx_end_ptr );
+
+		pr_info( "datalen: %d\n", (int)datalen );
+		pr_info( "mmio1_len: %d\n", (int)mmio1_len );
+		pr_info( "tx_free: %d\n", tx_free );
 		return -ERESTARTSYS;
 	}
+#endif
+
+	if ( pbuf0.tx_rd_ptr > pbuf0.tx_wr_ptr ) {
+		tx_free = pbuf0.tx_rd_ptr - pbuf0.tx_wr_ptr;
+	} else {
+		tx_free = (pbuf0.tx_wr_ptr - pbuf0.tx_rd_ptr) + (RING_BUF_MAX >> 1);
+	}
+
+	if ( wait_event_interruptible( write_q, ( tx_free > (RING_BUF_MAX >> 2) ) ) ) {
+		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
+		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
+		pr_info( "pbuf0.tx_start_ptr: %p\n", pbuf0.tx_start_ptr );
+		pr_info( "pbuf0.tx_end_ptr: %p\n", pbuf0.tx_end_ptr );
+
+		pr_info( "datalen: %d\n", (int)datalen );
+		pr_info( "mmio1_len: %d\n", (int)mmio1_len );
+		pr_info( "tx_free: %d\n", tx_free );
+		return -ERESTARTSYS;
+	}
+
+	if ( (pbuf0.tx_wr_ptr + datalen) > pbuf0.tx_end_ptr ) {
+		memcpy(pbuf0.tx_start_ptr, pbuf0.tx_rd_ptr, (pbuf0.tx_wr_ptr - pbuf0.tx_rd_ptr) );
+		pbuf0.tx_wr_ptr = pbuf0.tx_start_ptr + (pbuf0.tx_wr_ptr - pbuf0.tx_rd_ptr);
+		pbuf0.tx_rd_ptr = pbuf0.tx_start_ptr;
+	}
+
+	/* copy_from_user */
+	memcpy( pbuf0.tx_wr_ptr, data, datalen );
+	pbuf0.tx_wr_ptr += datalen;
 
 	// schedule workqueue
 	queue_work(ep_wq, &work1);
@@ -445,19 +570,21 @@ static irqreturn_t ep_interrupt(int irq, void *pdev)
 
 	status = *(mmio0_ptr + 0x10);
 
-	if (debug) {
+//	if (debug) {
 		pr_info( "Got a interrupt: status=%d\n", status );
-	}
+//	}
 
 	// is ethpipe interrupt?
-	if ( (status & 8) == 0 ) {
+	if ( (status & 16) == 0 ) {
 		goto lend;
 	}
 
 	handled = 1;
 
+	wake_up_interruptible( &write_q );
+
 	// clear interrupt flag
-	*(mmio0_ptr + 0x10) = status & 0xf7;
+	*(mmio0_ptr + 0x10) = status & 0xEF;
 
 lend:
 	return IRQ_RETVAL(handled);
@@ -536,7 +663,6 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 	/* NIC TX pointer */
 	sender_wr_ptr = (int *)(mmio0_ptr + TX_WR_PTR_ADDR);
 	sender_rd_ptr = (int *)(mmio0_ptr + TX_RD_PTR_ADDR);
-
 	if (debug) {
 		pr_info( "sender_wr_ptr: %X\n", *sender_wr_ptr );
 		pr_info( "sender_r_ptr: %X\n", *sender_rd_ptr );
@@ -569,8 +695,11 @@ static int __devinit ep_init_one(struct pci_dev *pdev,
 		pr_warn( "cannot request_irq\n" );
 	}
 
+	/* spinlock */
+	spin_lock_init(&wq_spinlock);
+
 	if (debug) {
-		pr_info( "pktlen: %d\n", (int)pktlen );
+		pr_info( "datalen: %d\n", (int)datalen );
 	}
 
 	return 0;
@@ -631,62 +760,88 @@ static struct pci_driver ep_pci_driver = {
  **/
 void work_body(struct work_struct *work)
 {
-	unsigned int copy_len = 0;
-
-	int tx_free;
-	int piece;
+	static int sender_wr_ptr_tmp, sender_rd_ptr_tmp;
+	unsigned int piece_len;
+	unsigned long flags;
+	unsigned short pkt_len;
+	unsigned char *pkt;
 
 	if (debug)
 		pr_info("%s\n", __func__);
 
+	spin_lock_irqsave( &wq_spinlock, flags );
+
+	// update sender_rd_ptr_tmp and sender_wr_ptr
+	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
+	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
+
 	if (debug) {
 		pr_info( "before\n" );
 //		pr_info( "count: %d\n", (int)count );
-		pr_info( "copy_len: %d\n", copy_len );
+		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
+		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
+		pr_info( "pbuf0.tx_start_ptr: %p\n", pbuf0.tx_start_ptr );
+		pr_info( "pbuf0.tx_end_ptr: %p\n", pbuf0.tx_end_ptr );
+		pr_info( "sender_rd_ptr: %d\n", *sender_rd_ptr );
+		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
 		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp );
 		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp );
-		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
-		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr );
+		pr_info( "mmio1_len: %d\n", (int)mmio1_len );
+		pr_info( "mmio1_ptr: %p\n\n", mmio1_ptr );
 	}
 
-	// mmio1 free space
-	if (sender_rd_ptr_tmp < sender_wr_ptr_tmp) {
-		tx_free = sender_wr_ptr_tmp - sender_rd_ptr_tmp;
+txloop:
+
+	// exit when ring buffer is empty
+	if (pbuf0.tx_rd_ptr == pbuf0.tx_wr_ptr)
+		goto txloop_exit;
+
+	// a packet data
+	pkt = pbuf0.tx_rd_ptr;
+
+	// ethpipe header size + packet size
+	pkt_len = EP_HDR_LEN + ((pkt[0] << 8) | pkt[1]);
+	if (debug)
+		pr_info( "pkt_len: %d\n", (int)pkt_len );
+
+	// copy data from ring buffer to NIC tx buffer
+	if ( (sender_wr_ptr_tmp + pkt_len) > (mmio1_len >> 1) ) {
+		piece_len = (mmio1_len >> 1) - sender_wr_ptr_tmp;
+		memcpy(mmio1_ptr+sender_wr_ptr_tmp, pbuf0.tx_rd_ptr, piece_len);
+		memcpy(mmio1_ptr, (pbuf0.tx_rd_ptr + piece_len), (pkt_len - piece_len));
 	} else {
-		tx_free = (sender_wr_ptr_tmp - sender_rd_ptr_tmp) + (mmio1_len >> 1);
+		memcpy(mmio1_ptr+sender_wr_ptr_tmp, pkt, pkt_len);
 	}
 
-	// copy_len
-	if (pktlen < tx_free) {
-		copy_len = pktlen;
+	// update read pointer of ring buffer
+	if ( (pbuf0.tx_rd_ptr + pkt_len) > pbuf0.tx_end_ptr ) {
+		pbuf0.tx_rd_ptr = pbuf0.tx_start_ptr + (pkt_len - (pbuf0.tx_end_ptr - pbuf0.tx_rd_ptr));
 	} else {
-		copy_len = tx_free;
+		pbuf0.tx_rd_ptr += pkt_len;
 	}
 
-	// copy pkt data to NIC board
-	if ( (sender_wr_ptr_tmp + pktlen) < (mmio1_len >> 1) ) {
-		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, pktlen);
-	} else {
-		piece = (mmio1_len >> 1) - sender_wr_ptr_tmp;
-		memcpy(mmio1_ptr + sender_wr_ptr_tmp, pkt, piece);
-		memcpy(mmio1_ptr, pkt + piece, pktlen - piece);
-	}
-
-	sender_wr_ptr_tmp += (pktlen + 1) & 0xfffffffe;
+	// update sender_wr_ptr_tmp
+	sender_wr_ptr_tmp += (pkt_len + 1) & 0xfffffffe;
 	sender_wr_ptr_tmp &= ((mmio1_len >> 1) - 1);
-
-	// update sender_wr_ptr
-	*sender_wr_ptr = sender_wr_ptr_tmp >> 1;
 
 	if (debug) {
 		pr_info( "after\n" );
-//		pr_info( "count: %d\n", (int)count);
-		pr_info( "copy_len: %d\n", copy_len);
+		pr_info( "pkt_len: %d\n", pkt_len );
 		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp);
 		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp);
+		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
+		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
 		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
 		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
 	}
+
+	goto txloop;
+
+txloop_exit:
+	// update NIC write pointer
+	*sender_wr_ptr = sender_wr_ptr_tmp >> 1;
+
+	spin_unlock_irqrestore( &wq_spinlock, flags );
 
 	return;
 }
