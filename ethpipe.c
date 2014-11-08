@@ -1,950 +1,352 @@
-#include <linux/init.h>
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/moduleparam.h>
+#include "ethpipe.h"
 
-#include <linux/fs.h>
-#include <linux/proc_fs.h>
-#include <linux/miscdevice.h>
-#include <linux/uaccess.h>
-#include <linux/stat.h>
-#include <linux/seq_file.h>
-#include <linux/wait.h>
-#include <linux/sched.h>
-
-#include <linux/pci.h>
-#include <linux/interrupt.h>
-#include <linux/workqueue.h>
-
-#include <linux/string.h>
-#include <linux/version.h>
+static int ethpipe_open(struct inode *inode, struct file *filp);
+static int ethpipe_release(struct inode *inode, struct file *filp);
+static void ethpipe_recv(void);
+static ssize_t ethpipe_read(struct file *filp, char __user *buf,
+				size_t count, loff_t *ppos);
+static void ethpipe_send(void);
+static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
+				size_t count, loff_t *ppos);
+static unsigned int ethpipe_poll( struct file* filp, poll_table* wait );
+static long ethpipe_ioctl(struct file *filp,
+				unsigned int cmd, unsigned long arg);
+static int ethpipe_tx_kthread(void *arg);
+static void ethpipe_free(void);
 
 
-#define VERSION "0.3.0"
-#define DRV_NAME "ethpipe"
-
-/* PCIe MMIO_0 Mapped Memory Address Table */
-#define TX_WR_PTR_ADDR	(0x30)
-#define TX_RD_PTR_ADDR	(0x34)
-
-#define EP_HDR_LEN	    (14)
-
-/* buffer size */
-#define RING_BUF_MAX	  (1024*1024*1)
-
-/* support old Linux version */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(3,8,0)
-#define __devinit
-#define __devexit
-#define __devexit_p
-#endif
-
-/* module parameters */
-static int debug = 0;
-
-/* pci parameters */
-static DEFINE_PCI_DEVICE_TABLE(ep_pci_tbl) = {
-	{ 0x3776, 0x8001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
-	{ 0, }
-};
-MODULE_DEVICE_TABLE(pci, ep_pci_tbl);
-
-/* pci registers */
-static unsigned char *mmio0_ptr = 0, *mmio1_ptr = 0;    // mmio pointer
-static unsigned long long mmio0_start, mmio0_end, mmio0_flags, mmio0_len;
-static unsigned long long mmio1_start, mmio1_end, mmio1_flags, mmio1_len;
-
-/* workqueue */
-static struct workqueue_struct *ep_wq;
-struct work_struct work1;
-
-/* procfs */
-struct proc_dir_entry *ep_proc_root;    // proc root dir
-
-/* scheduled transmission */
-static unsigned long long *counter125;
-static unsigned long long *lap1, *lap2;
-
-/* sender */
-static int *sender_wr_ptr, *sender_rd_ptr;    // NIC TX pointer
-
-/* wait queue */
-static wait_queue_head_t write_q;
-
-/* spinlock */
-static spinlock_t wq_spinlock;
-
-/* ring buffer */
-struct _pbuf_tx {
-	unsigned char *tx_start_ptr;
-	unsigned char *tx_end_ptr;
-	unsigned char *tx_wr_ptr;
-	unsigned char *tx_rd_ptr;
-} static pbuf0 = {0};
-
-/**
- * procfs handle functions
- *
- **/
-static ssize_t counter125_show( struct file *file, char *buf, size_t count,
-				loff_t *ppos )
-{
-	int len = 0;
-
-	if (debug)
-		pr_info("%s\t%d\n", __func__, (int)count);
-
-	len = sprintf(buf, "%llX\n", *counter125);
-	return len;
-}
-
-static ssize_t lap1_show( struct file *file, char *buf, size_t count,
-				loff_t *ppos )
-{
-	int len;
-
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	len = sprintf(buf, "%llX\n", *lap1);
-	return len;
-}
-
-static ssize_t lap1_store(struct file *file, const char __user *buf,
-				size_t count, loff_t *ppos)
-{
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	sscanf(buf, "%llX", lap1);
-	return count;
-}
-
-static ssize_t lap2_show( struct file *file, char *buf, size_t count,
-				loff_t *ppos )
-{
-	int len;
-
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	len = sprintf(buf, "%llX\n", *lap2);
-	return len;
-}
-
-static ssize_t lap2_store(struct file *file, const char __user *buf,
-				size_t count, loff_t *ppos)
-{
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	sscanf(buf, "%llX", lap2);
-	return count;
-}
-
-static const struct file_operations proc_counter125_fops = {
-	.read = counter125_show,
+static struct file_operations ethpipe_fops = {
+	.owner = THIS_MODULE,
+	.read = ethpipe_read,
+	.write = ethpipe_write,
+	.poll = ethpipe_poll,
+	.compat_ioctl = ethpipe_ioctl,
+	.open = ethpipe_open,
+	.release = ethpipe_release,
 };
 
-static const struct file_operations proc_lap1_fops = {
-	.read = lap1_show,
-	.write = lap1_store,
-};
-
-static const struct file_operations proc_lap2_fops = {
-	.read = lap2_show,
-	.write = lap2_store,
-};
-
-/**
- * ep_open
- *
- **/
-static int ep_open(struct inode *inode, struct file *file)
-{
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	return 0;
-}
-
-/**
-* ep_read:
-*
-**/
-static ssize_t ep_read(struct file *file, char __user *buf, size_t count,
-				loff_t *ppos)
-{
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	//sender_rd_ptr_tmp = *sender_rd_ptr << 1;
-
-	// fake interrupts
-	wake_up_interruptible( &write_q );
-
-	return 0;
-}
-
-
-#if 0
-static const unsigned char pkt[] = {
-	// ethpipe header
-	0x00, 0x3c,                                      /* pktlen */
-	0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-	// ethernet header
-	0x00, 0x21, 0x6a, 0x05, 0xf5, 0x2c,              /* dst mac */
-	0x00, 0x24, 0x17, 0xa3, 0xf4, 0x73,              /* src mac */
-	0x80, 0x00,                                      /* proto type */
-	// IPv4 header
-	0x45, 0x00, 0x00, 0x2e,                          /*  */
-	0xdf, 0x2e, 0x00, 0x00,                          /*  */
-	0x6e, 0x11, 0x80, 0xd7,                          /*  */
-	0x18, 0x22, 0x12, 0xaa,                          /* src IP addr */
-	0xc0, 0xa8, 0x01, 0x45,                          /* dst IP addr */
-	// UDP header
-	0xc4, 0x98, 0xf3, 0xb2,                          /*  */
-	0x00, 0x1a, 0x83, 0xfb,                          /*  */
-	// payload
-	0x02, 0xca, 0x02, 0x38, 0xd0, 0x25, 0x0a, 0x2f,
-	0x63, 0x3b, 0x37, 0xfc, 0x47, 0xf3, 0xd4, 0x46,
-	0x3f, 0xf1
-};
-#endif
-
-static const unsigned char data[] = {
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01,
-
-// ethpipe header
-0x00, 0x5c,                                      /* pktlen */
-0x00, 0x00, 0x00, 0x00,                          /* 5tuple-hash */
-0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  /* timestamp */
-// ethernet header
-0xa0, 0x36, 0x9f, 0x18, 0x50, 0xe5,
-0x00, 0x1c, 0x7e, 0x6a, 0xba, 0xd1,
-0x08, 0x00,
-// IPv4 header
-0x45, 0x00, 0x00, 0x4e,
-0x00, 0x00, 0x40, 0x00,
-0x40, 0x11, 0xfb, 0x32,
-0x0a, 0x00, 0x00, 0x6e,
-0x0a, 0x00, 0x00, 0x02,
-// payload
-0x04, 0x04, 0x00, 0x89, 0x00, 0x3a, 0x38, 0x03,
-0x10, 0xfd, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00,
-0x00, 0x00, 0x00, 0x00, 0x20, 0x46, 0x45, 0x45,
-0x4e, 0x45, 0x42, 0x46, 0x45, 0x46, 0x44, 0x46,
-0x46, 0x46, 0x4a, 0x45, 0x42, 0x43, 0x4e, 0x45,
-0x49, 0x46, 0x41, 0x43, 0x41, 0x43, 0x41, 0x43,
-0x41, 0x43, 0x41, 0x43, 0x41, 0x00, 0x00, 0x20,
-0x00, 0x01
-
-};
-
-static const unsigned short datalen = sizeof(data) / sizeof(data[0]);
-
-/**
- * ep_write
- *
- **/
-static ssize_t ep_write(struct file *file, const char __user *buf,
-				size_t count, loff_t *ppos)
-{
-	unsigned int tx_free;
-
-	if (debug)
-		pr_info("%s\n", __func__);
-
-#if 0
-	// update sender_rd_ptr_tmp and sender_wr_ptr
-	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
-	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
-
-	// mmio1 free space
-	if (sender_rd_ptr_tmp > sender_wr_ptr_tmp) {
-		tx_free = sender_rd_ptr_tmp - sender_wr_ptr_tmp;
-	} else {
-		tx_free = (sender_wr_ptr_tmp - sender_rd_ptr_tmp) + (mmio1_len >> 1);
-	}
-
-	if ( wait_event_interruptible( write_q, ( tx_free > (mmio1_len >> 3) ) ) ) {
-		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp );
-		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp );
-		pr_info( "sender_rd_ptr: %d\n", *sender_rd_ptr );
-		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
-
-		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
-		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
-		pr_info( "pbuf0.tx_start_ptr: %p\n", pbuf0.tx_start_ptr );
-		pr_info( "pbuf0.tx_end_ptr: %p\n", pbuf0.tx_end_ptr );
-
-		pr_info( "datalen: %d\n", (int)datalen );
-		pr_info( "mmio1_len: %d\n", (int)mmio1_len );
-		pr_info( "tx_free: %d\n", tx_free );
-		return -ERESTARTSYS;
-	}
-#endif
-
-	if ( pbuf0.tx_rd_ptr > pbuf0.tx_wr_ptr ) {
-		tx_free = pbuf0.tx_rd_ptr - pbuf0.tx_wr_ptr;
-	} else {
-		tx_free = (pbuf0.tx_wr_ptr - pbuf0.tx_rd_ptr) + (RING_BUF_MAX >> 1);
-	}
-
-	if ( wait_event_interruptible( write_q, ( tx_free > (RING_BUF_MAX >> 2) ) ) ) {
-		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
-		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
-		pr_info( "pbuf0.tx_start_ptr: %p\n", pbuf0.tx_start_ptr );
-		pr_info( "pbuf0.tx_end_ptr: %p\n", pbuf0.tx_end_ptr );
-
-		pr_info( "datalen: %d\n", (int)datalen );
-		pr_info( "mmio1_len: %d\n", (int)mmio1_len );
-		pr_info( "tx_free: %d\n", tx_free );
-		return -ERESTARTSYS;
-	}
-
-	if ( (pbuf0.tx_wr_ptr + datalen) > pbuf0.tx_end_ptr ) {
-		memcpy(pbuf0.tx_start_ptr, pbuf0.tx_rd_ptr, (pbuf0.tx_wr_ptr - pbuf0.tx_rd_ptr) );
-		pbuf0.tx_wr_ptr = pbuf0.tx_start_ptr + (pbuf0.tx_wr_ptr - pbuf0.tx_rd_ptr);
-		pbuf0.tx_rd_ptr = pbuf0.tx_start_ptr;
-	}
-
-	/* copy_from_user */
-	memcpy( pbuf0.tx_wr_ptr, data, datalen );
-	pbuf0.tx_wr_ptr += datalen;
-
-	// schedule workqueue
-	queue_work(ep_wq, &work1);
-
-	return count;
-}
-
-/**
- * ep_release
- *
- **/
-static int ep_release(struct inode *inode, struct file *file)
-{
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	return 0;
-}
-
-static struct file_operations ep_fops = {
-	.owner    = THIS_MODULE,
-	.open     = ep_open,
-	.read     = ep_read,
-	.write    = ep_write,
-	.release  = ep_release,
-};
-
-static struct miscdevice ep_misc_device = {
+static struct miscdevice ethpipe_dev = {
 	.minor = MISC_DYNAMIC_MINOR,
-	.name  = DRV_NAME,
-	.fops  = &ep_fops,
+	.name = DRV_NAME,
+	.fops = &ethpipe_fops,
 };
 
-/**
- * ep_interrupt
- *
- **/
-static irqreturn_t ep_interrupt(int irq, void *pdev)
+/*
+ * ethpipe_open
+ */
+static int ethpipe_open(struct inode *inode, struct file *filp)
 {
-	int status, handled = 0;
-
-	status = *(mmio0_ptr + 0x10);
-
-//	if (debug) {
-		pr_info( "Got a interrupt: status=%d\n", status );
-//	}
-
-	// is ethpipe interrupt?
-	if ( (status & 16) == 0 ) {
-		goto lend;
-	}
-
-	handled = 1;
-
-	wake_up_interruptible( &write_q );
-
-	// clear interrupt flag
-	*(mmio0_ptr + 0x10) = status & 0xEF;
-
-lend:
-	return IRQ_RETVAL(handled);
-}
-
-/**
- * ep_init_one
- *
- **/
-static int __devinit ep_init_one(struct pci_dev *pdev,
-				const struct pci_device_id *ent)
-{
-	static char devname[16];
-	static int board_idx = -1;
-	int ret;
-
-	pr_info( "%s\n", __func__ );
-
-	mmio0_ptr = 0;
-	mmio1_ptr = 0;
-
-	/* attach PCI device */
-	ret = pci_enable_device(pdev);
-	if (ret)
-		goto err;
-	ret = pci_request_regions(pdev, DRV_NAME);
-	if (ret)
-		goto err;
-
-	++board_idx;
-	pr_info( "board_idx: %d\n", board_idx );
-
-	/* PCI mmio0 setup */
-	mmio0_start = pci_resource_start(pdev, 0);
-	mmio0_end   = pci_resource_end(pdev, 0);
-	mmio0_flags = pci_resource_flags(pdev, 0);
-	mmio0_len   = pci_resource_len(pdev, 0);
-
-	pr_info( "mmio0_start: %X\n", (unsigned int)mmio0_start );
-	pr_info( "mmio0_end  : %X\n", (unsigned int)mmio0_end );
-	pr_info( "mmio0_flags: %X\n", (unsigned int)mmio0_flags );
-	pr_info( "mmio0_len  : %X\n", (unsigned int)mmio0_len );
-
-	mmio0_ptr = ioremap(mmio0_start, mmio0_len);
-	if (!mmio0_ptr) {
-		pr_warn( "cannot ioremap mmio0 base\n" );
-		goto err;
-	}
-
-	/* PCI mmio1 setup */
-	mmio1_start = pci_resource_start(pdev, 2);
-	mmio1_end   = pci_resource_end(pdev, 2);
-	mmio1_flags = pci_resource_flags(pdev, 2);
-	mmio1_len   = pci_resource_len(pdev, 2);
-
-	pr_info( "mmio1_start: %X\n", (unsigned int)mmio1_start );
-	pr_info( "mmio1_end  : %X\n", (unsigned int)mmio1_end );
-	pr_info( "mmio1_flags: %X\n", (unsigned int)mmio1_flags );
-	pr_info( "mmio1_len  : %X\n", (unsigned int)mmio1_len );
-
-	mmio1_ptr = ioremap_wc(mmio1_start, mmio1_len);
-	if (!mmio1_ptr) {
-		pr_warn( "cannot ioremap mmio1 base\n" );
-		goto err;
-	}
-
-	/* register ethpipe character device */
-	sprintf( devname, "%s/%d", DRV_NAME, board_idx );
-	ep_misc_device.name = devname;
-	ret = misc_register(&ep_misc_device);
-	if (ret) {
-		pr_info("Fail to misc_register (MISC_DYNAMIC_MINOR)\n");
-		return ret;
-	}
-
-	/* NIC TX pointer */
-	sender_wr_ptr = (int *)(mmio0_ptr + TX_WR_PTR_ADDR);
-	sender_rd_ptr = (int *)(mmio0_ptr + TX_RD_PTR_ADDR);
-	if (debug) {
-		pr_info( "sender_wr_ptr: %X\n", *sender_wr_ptr );
-		pr_info( "sender_r_ptr: %X\n", *sender_rd_ptr );
-	}
-
-	*sender_wr_ptr = *sender_rd_ptr;    // clear TX queue write pointer
-
-	/* ring buffer */
-	if ( ( pbuf0.tx_start_ptr = kmalloc(RING_BUF_MAX, GFP_KERNEL) ) == 0 ) {
-		pr_err( "Fail to kmalloc: pbuf0.tx_start_ptr\n" );
-		goto err;
-	}
-	pbuf0.tx_end_ptr = pbuf0.tx_start_ptr + RING_BUF_MAX - 1;
-	pbuf0.tx_wr_ptr  = pbuf0.tx_start_ptr;
-	pbuf0.tx_rd_ptr  = pbuf0.tx_start_ptr;
-
-	/* scheduled transmission */
-	counter125 = (unsigned long long *)(mmio0_ptr + 0x4);
-	lap1 = (unsigned long long *)(mmio0_ptr + 0x100);
-	lap2 = (unsigned long long *)(mmio0_ptr + 0x108);
-
-	if (debug) {
-		pr_info( "counter125: %X\n", *(unsigned int *)counter125 );
-		pr_info( "lap1: %X\n", *(unsigned int *)lap1 );
-		pr_info( "lap2: %X\n", *(unsigned int *)lap2 );
-	}
-
-	/* interrupt handler */
-	if (request_irq( pdev->irq, ep_interrupt, IRQF_SHARED, DRV_NAME, pdev)) {
-		pr_warn( "cannot request_irq\n" );
-	}
-
-	/* spinlock */
-	spin_lock_init(&wq_spinlock);
-
-	if (debug) {
-		pr_info( "datalen: %d\n", (int)datalen );
-	}
+	func_enter();
 
 	return 0;
-
-err:
-	if (pbuf0.tx_start_ptr) {
-		kfree(pbuf0.tx_start_ptr);
-		pbuf0.tx_start_ptr = NULL;
-	}
-
-	pci_release_regions(pdev);
-	pci_disable_device(pdev);
-	return -1;
 }
 
-/**
- * ep_remove_one
- *
- **/
-static void __devexit ep_remove_one(struct pci_dev *pdev)
+/*
+ * ethpipe_release
+ */
+static int ethpipe_release(struct inode *inode, struct file *filp)
 {
-	pr_info("%s\n", __func__);
+	func_enter();
 
-	/* disable interrupts */
-	disable_irq(pdev->irq);
-	free_irq(pdev->irq, pdev);
-
-	if (mmio0_ptr) {
-		iounmap(mmio0_ptr);
-		mmio0_ptr = 0;
-	}
-
-	if (mmio1_ptr) {
-		iounmap(mmio1_ptr);
-		mmio1_ptr = 0;
-	}
-
-	if (pbuf0.tx_start_ptr) {
-		kfree(pbuf0.tx_start_ptr);
-		pbuf0.tx_start_ptr = NULL;
-	}
-
-	/* detach pci device */
-	pci_release_regions(pdev);
-	pci_disable_device(pdev);
+	return 0;
 }
 
-static struct pci_driver ep_pci_driver = {
-	.name     = DRV_NAME,
-	.id_table = ep_pci_tbl,
-	.probe    = ep_init_one,
-	.remove   = __devexit_p(ep_remove_one),
-};
-
-/**
- * work_body
- *
- **/
-void work_body(struct work_struct *work)
+/*
+ * ethpipe_recv
+ */
+static void ethpipe_recv(void)
 {
-	static int sender_wr_ptr_tmp, sender_rd_ptr_tmp;
-	unsigned int piece_len;
-	unsigned long flags;
-	unsigned short pkt_len;
-	unsigned char *pkt;
-
-	if (debug)
-		pr_info("%s\n", __func__);
-
-	spin_lock_irqsave( &wq_spinlock, flags );
-
-	// update sender_rd_ptr_tmp and sender_wr_ptr
-	sender_rd_ptr_tmp = *sender_rd_ptr << 1;
-	sender_wr_ptr_tmp = *sender_wr_ptr << 1;
-
-	if (debug) {
-		pr_info( "before\n" );
-//		pr_info( "count: %d\n", (int)count );
-		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
-		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
-		pr_info( "pbuf0.tx_start_ptr: %p\n", pbuf0.tx_start_ptr );
-		pr_info( "pbuf0.tx_end_ptr: %p\n", pbuf0.tx_end_ptr );
-		pr_info( "sender_rd_ptr: %d\n", *sender_rd_ptr );
-		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr );
-		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp );
-		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp );
-		pr_info( "mmio1_len: %d\n", (int)mmio1_len );
-		pr_info( "mmio1_ptr: %p\n\n", mmio1_ptr );
-	}
-
-txloop:
-
-	// exit when ring buffer is empty
-	if (pbuf0.tx_rd_ptr == pbuf0.tx_wr_ptr)
-		goto txloop_exit;
-
-	// a packet data
-	pkt = pbuf0.tx_rd_ptr;
-
-	// ethpipe header size + packet size
-	pkt_len = EP_HDR_LEN + ((pkt[0] << 8) | pkt[1]);
-	if (debug)
-		pr_info( "pkt_len: %d\n", (int)pkt_len );
-
-	// copy data from ring buffer to NIC tx buffer
-	if ( (sender_wr_ptr_tmp + pkt_len) > (mmio1_len >> 1) ) {
-		piece_len = (mmio1_len >> 1) - sender_wr_ptr_tmp;
-		memcpy(mmio1_ptr+sender_wr_ptr_tmp, pbuf0.tx_rd_ptr, piece_len);
-		memcpy(mmio1_ptr, (pbuf0.tx_rd_ptr + piece_len), (pkt_len - piece_len));
-	} else {
-		memcpy(mmio1_ptr+sender_wr_ptr_tmp, pkt, pkt_len);
-	}
-
-	// update read pointer of ring buffer
-	if ( (pbuf0.tx_rd_ptr + pkt_len) > pbuf0.tx_end_ptr ) {
-		pbuf0.tx_rd_ptr = pbuf0.tx_start_ptr + (pkt_len - (pbuf0.tx_end_ptr - pbuf0.tx_rd_ptr));
-	} else {
-		pbuf0.tx_rd_ptr += pkt_len;
-	}
-
-	// update sender_wr_ptr_tmp
-	sender_wr_ptr_tmp += (pkt_len + 1) & 0xfffffffe;
-	sender_wr_ptr_tmp &= ((mmio1_len >> 1) - 1);
-
-	if (debug) {
-		pr_info( "after\n" );
-		pr_info( "pkt_len: %d\n", pkt_len );
-		pr_info( "sender_rd_ptr_tmp: %d\n", sender_rd_ptr_tmp);
-		pr_info( "sender_wr_ptr_tmp: %d\n", sender_wr_ptr_tmp);
-		pr_info( "pbuf0.tx_rd_ptr: %p\n", pbuf0.tx_rd_ptr );
-		pr_info( "pbuf0.tx_wr_ptr: %p\n", pbuf0.tx_wr_ptr );
-		pr_info( "sender_wr_ptr: %d\n", *sender_wr_ptr);
-		pr_info( "sender_rd_ptr: %d\n\n", *sender_rd_ptr);
-	}
-
-	goto txloop;
-
-txloop_exit:
-	// update NIC write pointer
-	*sender_wr_ptr = sender_wr_ptr_tmp >> 1;
-
-	spin_unlock_irqrestore( &wq_spinlock, flags );
+	func_enter();
 
 	return;
 }
 
-/**
- * ep_init
- *
- **/
-static int __init ep_init(void)
+/*
+ * ethpipe_read
+ */
+static ssize_t ethpipe_read(struct file *filp, char __user *buf,
+			   size_t count, loff_t *ppos)
 {
-	struct proc_dir_entry *pe_counter125, *pe_lap1, *pe_lap2;
-	int ret;
+	func_enter();
+
+	ethpipe_recv();
+
+	return count;
+}
+
+/*
+ * ethpipe_send
+ */
+static void ethpipe_send(void)
+{
+	int limit, i;
+	uint32_t magic, frame_len;
+	struct ep_ring *txq = &pdev->txq;
+
+	func_enter();
+
+	limit = XMIT_BUDGET;
+
+	while(!ring_empty(txq) && (--limit > 0)) {
+		magic = ring_next_magic(txq);
+		if (magic != EP_MAGIC) {
+			pr_info("format error: magic code %X\n", (int)magic);
+			goto error;
+		}
+
+		frame_len = ring_next_frame_len(txq);
+		if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
+			pr_info("packet size error: %X\n", (int)frame_len);
+			goto error;
+		}
+
+#if 0
+		printk("PKT:");
+		printk(" %d", magic);
+		printk(" %d", frame_len);
+		for (i = 0; i < frame_len; i++) {
+			printk(" %02X", txq->read[EP_HDR_SIZE+i]);
+		}
+		printk("\n");
+#endif
+
+		ring_read_next_aligned(txq, EP_HDR_SIZE + frame_len);
+	}
+
+	return;
+
+error:
+	pr_info("kthread: tx_err\n");
+	txq->read = txq->start;
+	txq->write = txq->start;
+
+	return;
+}
+
+/*
+ * ethpipe_write
+ */
+static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
+			    size_t count, loff_t *ppos)
+{
+	uint32_t magic, frame_len, len;
+	struct ep_ring *wrq = &pdev->wrq;
+	struct ep_ring *txq = &pdev->txq;
+
+	func_enter();
+
+	// userland to wrq
+	wrq->write = wrq->start;
+	wrq->read = wrq->start;
+	if (copy_from_user(wrq->write, buf, count)) {
+		pr_info("copy_from_user failed. \n");
+		RING_INFO(wrq);
+		RING_INFO(txq);
+		return -EFAULT;
+	}
+	ring_write_next(wrq, count);
+
+	// wrq to txq
+	while (!ring_empty(wrq)) {
+		magic = ring_next_magic(wrq);
+		if (magic != EP_MAGIC) {
+			pr_info("format error: magic code %X\n", (int)magic);
+			return -EFAULT;
+		}
+
+		frame_len = ring_next_frame_len(wrq);
+		if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
+			pr_info("packet size error: %X\n", (int)frame_len);
+			return -EFAULT;
+		}
+
+		len = EP_HDR_SIZE + frame_len;
+		if (!ring_almost_full(txq)) {
+			memcpy(txq->write, wrq->read, len);
+			ring_read_next(wrq, len);
+			ring_write_next_aligned(txq, len);
+		} else {
+			// return when a ring buffer reached the max size
+			printk("full!!!\n");
+			break;
+		}
+	}
+
+	return (count - ring_count(wrq));
+}
+
+/*
+ * ethpipe_poll
+ */
+static unsigned int ethpipe_poll(struct file* filp, poll_table* wait)
+{
+	unsigned int retmask = 0;
+
+	func_enter();
+
+	poll_wait(filp, &pdev->read_q, wait);
+
+//	if (pdev->rxbuf.read_ptr != pdev->rxbuf.write_ptr) {
+//		retmask |= (POLLIN  | POLLRDNORM);
+//	}
+
+	return retmask;
+}
+
+/*
+ * ethpipe_ioctl
+ */
+static long ethpipe_ioctl(struct file *filp,
+			unsigned int cmd, unsigned long arg)
+{
+	func_enter();
+
+	return  -ENOTTY;
+}
+
+
+static int ethpipe_tx_kthread(void *arg)
+{
+	int cpu = smp_processor_id();
+
+	pr_info("starting ethpiped/%d:  pid=%d\n", cpu, task_pid_nr(current));
+
+	set_current_state(TASK_INTERRUPTIBLE);
+
+	while (!kthread_should_stop()) {
+		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
+
+		if (pdev->txq.read == pdev->txq.write) {
+			schedule_timeout_interruptible(1000);
+			continue;
+		}
+
+		__set_current_state(TASK_RUNNING);
+
+		ethpipe_send();
+		if (need_resched())
+			schedule();
+		else
+			cpu_relax();
+
+		set_current_state(TASK_INTERRUPTIBLE);
+	}
+
+	pr_info("kthread_exit: cpu=%d\n", cpu);
+
+	return 0;
+}
+
+static void ethpipe_free(void)
+{
+	/* free tx buffer */
+	if (pdev->txq.start) {
+		vfree(pdev->txq.start);
+		pdev->txq.start = NULL;
+	}
+
+	/* free write buffers */
+	if (pdev->wrq.start) {
+		vfree(pdev->wrq.start);
+		pdev->wrq.start = NULL;
+	}
+
+	kthread_stop(pdev->txth.tsk);
+
+	if (pdev) {
+		kfree(pdev);
+		pdev = NULL;
+	}
+}
+
+static int __init ethpipe_init(void)
+{
+	int ret = 0, idx = 0;
+	static char name[16];
 
 	pr_info("%s\n", __func__);
 
-	/* waitqueue */
-	init_waitqueue_head( &write_q );
-
-	/* workqueue */
-	ep_wq = alloc_workqueue("ethpipe", WQ_UNBOUND, 0);
-	if (!ep_wq) {
-		pr_err( "alloc_workqueue failed\n" );
-		ret = -ENOMEM;
-		goto out;
-	}
-	INIT_WORK( &work1, work_body );
-
-	/* register ethpipe procfs entries */
-	// dir: /proc/ethpipe
-	ep_proc_root = proc_mkdir(DRV_NAME, NULL);
-	if (!ep_proc_root) {
-		pr_warn("cannot create /proc/%s\n", DRV_NAME);
-		return -ENODEV;
+	/* malloc pdev */
+	if ((pdev = kmalloc(sizeof(struct ep_dev), GFP_KERNEL)) == 0) {
+		pr_info("fail to kmalloc: *pdev\n");
+		goto error;
 	}
 
-	// proc file: /proc/ethpipe/counter
-	pe_counter125 = proc_create("counter125", 0666, ep_proc_root,
-				&proc_counter125_fops);
-	if (pe_counter125 == NULL) {
-		pr_err("cannot create %s procfs entry\n", "counter125");
-		ret = -EINVAL;
-		goto remove_counter125;
-	}
-	// proc file: /proc/ethpipe/lap1
-	pe_lap1 = proc_create("lap1", 0666, ep_proc_root, &proc_lap1_fops);
-	if (pe_lap1 == NULL) {
-		pr_err("cannot create %s procfs entry\n", "lap1");
-		ret = -EINVAL;
-		goto remove_lap1;
-	}
-	// proc file: /proc/ethpipe/lap2
-	pe_lap2 = proc_create("lap2", 0666, ep_proc_root, &proc_lap2_fops);
-	if (pe_lap2 == NULL) {
-		pr_err("cannot create %s procfs entry\n", "lap2");
-		ret = -EINVAL;
-		goto remove_lap2;
+	/* tx ring size from module parameter */
+	pdev->txq_size = txq_size * 1024 * 1024;
+	pr_info("pdev->txq_size: %d\n", pdev->txq_size);
+
+	/* rx ring size from module parameter */
+	pdev->rxq_size = rxq_size * 1024 * 1024;
+	pr_info("pdev->rxq_size: %d\n", pdev->rxq_size);
+
+	// create tx thread
+	pdev->txth.tsk = kthread_run(ethpipe_tx_kthread, NULL, "tx_kthread");
+	if (IS_ERR(pdev->txth.tsk)) {
+		pr_info("can't create tx thread\n");
+		goto error;
 	}
 
-	return pci_register_driver(&ep_pci_driver);
+	/* init transmit buffer */
+	if ((pdev->txq.start = vmalloc(pdev->txq_size)) == 0) {
+		pr_info("fail to vmalloc: txq\n");
+		goto error;
+	}
+	pdev->txq.end   = pdev->txq.start + pdev->txq_size - MAX_PKT_SIZE;
+	pdev->txq.write = pdev->txq.start;
+	pdev->txq.read  = pdev->txq.start;
+	pdev->txq.size  = pdev->txq_size;
+	pdev->txq.mask  = pdev->txq_size - 1;
 
-remove_lap2:
-	remove_proc_entry("lap2", ep_proc_root);
-remove_lap1:
-	remove_proc_entry("lap1", ep_proc_root);
-remove_counter125:
-	remove_proc_entry("counter125", ep_proc_root);
-	remove_proc_entry(DRV_NAME, NULL);
-out:
-	return ret;
+	/* init write buffer */
+	if ((pdev->wrq.start = vmalloc(pdev->txq_size)) == 0) {
+		pr_info("fail to vmalloc: wrq\n");
+		goto error;
+	}
+	pdev->wrq.end   = pdev->wrq.start + pdev->txq_size - MAX_PKT_SIZE;
+	pdev->wrq.write = pdev->wrq.start;
+	pdev->wrq.read  = pdev->wrq.start;
+	pdev->wrq.size  = pdev->txq_size;
+	pdev->wrq.mask  = pdev->txq_size - 1;
+
+
+	/* register character device */
+	sprintf(name, "%s/%d", DRV_NAME, idx);
+	ethpipe_dev.name = name;
+	ret = misc_register(&ethpipe_dev);
+	if (ret) {
+		pr_info("fail to misc_register (MISC_DYNAMIC_MINOR)\n");
+		goto error;
+	}
+
+	return 0;
+
+error:
+	ethpipe_free();
+
+	return -1;
 }
 
-/**
- * ep_exit_module
- *
- **/
-static void __exit ep_cleanup(void)
+static void __exit ethpipe_cleanup(void)
 {
-	pr_info("%s\n", __func__);
+	func_enter();
 
-	/* pci */
-	misc_deregister(&ep_misc_device);
-	pci_unregister_driver(&ep_pci_driver);
+	misc_deregister(&ethpipe_dev);
 
-	/* workqueue */
-	if (ep_wq) {
-		flush_workqueue(ep_wq);
-		destroy_workqueue(ep_wq);
-		ep_wq = NULL;
-	}
-
-	/* procfs */
-	remove_proc_entry("lap2", ep_proc_root);
-	remove_proc_entry("lap1", ep_proc_root);
-	remove_proc_entry("counter125", ep_proc_root);
-	remove_proc_entry(DRV_NAME, NULL);
+	ethpipe_free();
 }
 
-module_init(ep_init);
-module_exit(ep_cleanup);
+module_init(ethpipe_init);
+module_exit(ethpipe_cleanup);
 
 MODULE_AUTHOR("Yohei Kuga <sora@haeena.net>");
-MODULE_DESCRIPTION("Ethernet Character device");
+MODULE_DESCRIPTION("Packet Character device");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(VERSION);
 module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Enable debug mode");
+module_param(txq_size, int, S_IRUGO);
+MODULE_PARM_DESC(txq_size, "TX ring size on each xmit kthread (MB)");
+module_param(rxq_size, int, S_IRUGO);
+MODULE_PARM_DESC(rxq_size, "RX ring size on each xmit kthread (MB)");
+
