@@ -186,7 +186,8 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 			ring_write_next_aligned(txq, len);
 		} else {
 			// return when a ring buffer reached the max size
-			pr_info("txq is full.\n");
+			pr_debug("txq is full.\n");
+			cpu_relax();
 			break;
 		}
 	}
@@ -236,7 +237,7 @@ static int ethpipe_tx_kthread(void *unused)
 		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
 
 		if (pdev->txq.read == pdev->txq.write) {
-			schedule_timeout_interruptible(10);
+			schedule_timeout_interruptible(1);
 			continue;
 		}
 
