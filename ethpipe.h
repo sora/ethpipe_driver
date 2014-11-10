@@ -25,13 +25,12 @@
 #define VERSION  "0.4.0"
 #define DRV_NAME "ethpipe"
 
-#define EP_MAGIC           (0x3776)
-#define EP_HDR_SIZE        (4)
-#define MAX_PKT_SIZE       (9014)
-#define MIN_PKT_SIZE       (40)
-#define EP_BUF_SIZE        (1024*1024*4)
-#define RING_ALMOST_FULL   (MAX_PKT_SIZE*3)
-#define XMIT_BUDGET        (0x3F)
+#define EP_MAGIC           0x3776
+#define EP_HDR_SIZE        4
+#define MAX_PKT_SIZE       9014
+#define MIN_PKT_SIZE       40
+#define RING_ALMOST_FULL   (MAX_PKT_SIZE*2)
+#define XMIT_BUDGET        0x3F
 
 /* EtherPIPE NIC IOMMU registers */
 #define TX0_WRITE_ADDR     (0x30)
@@ -40,7 +39,7 @@
 
 #define func_enter() pr_debug("entering %s\n", __func__);
 
-#define RING_INFO(X)                         \
+#define RING_INFO(X)                          \
 printk("[%s]: size=%d, ", __func__, X->size); \
 printk("mask=%d, ", X->mask);                 \
 printk("start=%p, ", X->start);               \
@@ -50,47 +49,39 @@ printk("write=%p\n", X->write);
 
 
 struct ep_thread {
-	unsigned int cpu;			/* cpu id that the thread is runnig */
-	struct task_struct *tsk;		/* xmit kthread */
+	unsigned int cpu;         /* cpu id that the thread is runnig */
+	struct task_struct *tsk;  /* xmit kthread */
 };
 
 struct ep_ring {
-	uint32_t size;						/* size of ring */
-	uint32_t mask;						/* (size - 1) of ring */
-	uint8_t *start;					/* start pointer of buffer */
-	uint8_t *end;						/* end pointer of buffer */
-	uint8_t *read;			/* next position to be read */
-	uint8_t *write;		/* next position to be written */
+	uint32_t size;            /* malloc size of ring */
+	uint8_t *start;           /* start address */
+	uint8_t *end;             /* end address */
+	uint32_t mask;            /* (size - 1) of ring */
+	volatile uint8_t *read;   /* next position to be read */
+	volatile uint8_t *write;  /* next position to be written */
 };
 
 struct ep_dev {
-	/* TX ring size */
-	int txq_size;
+	int txq_size;          /* TX ring size */
+	int rxq_size;          /* RX ring size */
+	int wrq_size;          /* write ring size */
+	int rdq_size;          /* read ring size */
 
-	/* RX ring size */
-	int rxq_size;
+	struct ep_ring txq;    /* tx ring buffer */
+	struct ep_ring rxq;    /* rx ring buffer */
+	struct ep_ring wrq;    /* to store copy_from_user() data */
+	struct ep_ring rdq;    /* rx ring buffer from dev_add_pack */
+
+	struct ep_thread txth; /* tx thread for sending packets */
+//	struct ep_thread rxth; /* rx thread for recv packets */
+
+	uint32_t tx_counter;   /* tx packet counter */
+	uint32_t rx_counter;   /* rx packet counter */
 
 	/* RX wait queue */
 	wait_queue_head_t read_q;
 	struct semaphore pktdev_sem;
-
-	/* tx thread for sending packets */
-	struct ep_thread txth;
-
-	/* rx thread for recv packets */
-//	struct ep_thread rxth;
-
-	/* tx ring buffer */
-	struct ep_ring txq;
-
-	/* rx ring buffer */
-	struct ep_ring rxq;
-
-	/* tx tmp buffer to store copy_from_user() data */
-	struct ep_ring wrq;
-
-	/* rx ring buffer from dev_add_pack */
-	struct ep_ring rdq;
 };
 
 /* Global variables */
@@ -100,6 +91,8 @@ static struct ep_dev *pdev;
 static int debug = 0;
 static int txq_size = 1;
 static int rxq_size = 1;
+static int wrq_size = 1;
+static int rdq_size = 1;
 
 
 static inline uint32_t ring_count(const struct ep_ring *r)
@@ -134,18 +127,8 @@ static inline uint32_t ring_next_frame_len(struct ep_ring *r)
 
 static inline void ring_write_next(struct ep_ring *r, uint32_t size)
 {
-	if (r->write < r->end) {
-		r->write += size;
-	} else {
-		r->write = r->start;
-	}
-}
-
-static inline void ring_write_next_aligned(struct ep_ring *r, uint32_t size)
-{
-	if (r->write < r->end) {
-		r->write += ALIGN(size, 4);
-	} else {
+	r->write += size;
+	if (r->write > r->end) {
 		r->write = r->start;
 	}
 }
@@ -153,22 +136,31 @@ static inline void ring_write_next_aligned(struct ep_ring *r, uint32_t size)
 static inline void ring_read_next(struct ep_ring *r, uint32_t size)
 {
 	r->read += size;
-	if (r->read > r->end)
+	if (r->read > r->end) {
 		r->read = r->start;
+	}
+}
+
+static inline void ring_write_next_aligned(struct ep_ring *r, uint32_t size)
+{
+	r->write += ALIGN(size, 4);
+	if (r->write > r->end) {
+		r->write = r->start;
+	}
 }
 
 static inline void ring_read_next_aligned(struct ep_ring *r, uint32_t size)
 {
 	r->read += ALIGN(size, 4);
-	if (r->read > r->end)
+	if (r->read > r->end) {
 		r->read = r->start;
+	}
 }
 
 static inline void pcie_pio_set(uint32_t *p, uint32_t n)
 {
 	*p = ALIGN(n, 2) >> 1;
 }
-
 
 static inline uint32_t pcie_pio_read(uint32_t *p, uint32_t n)
 {

@@ -11,7 +11,7 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 static unsigned int ethpipe_poll( struct file* filp, poll_table* wait );
 static long ethpipe_ioctl(struct file *filp,
 				unsigned int cmd, unsigned long arg);
-static int ethpipe_tx_kthread(void *arg);
+static int ethpipe_tx_kthread(void *unused);
 static void ethpipe_free(void);
 
 
@@ -79,21 +79,25 @@ static ssize_t ethpipe_read(struct file *filp, char __user *buf,
  */
 static void ethpipe_send(void)
 {
-	int limit, i;
+	int limit;
 	uint32_t magic, frame_len;
 	struct ep_ring *txq = &pdev->txq;
 
 	func_enter();
 
+	// reset xmit budget
 	limit = XMIT_BUDGET;
 
+	// sending
 	while(!ring_empty(txq) && (--limit > 0)) {
+		// check magic code
 		magic = ring_next_magic(txq);
 		if (magic != EP_MAGIC) {
 			pr_info("format error: magic code %X\n", (int)magic);
 			goto error;
 		}
 
+		// check frame length
 		frame_len = ring_next_frame_len(txq);
 		if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
 			pr_info("packet size error: %X\n", (int)frame_len);
@@ -101,6 +105,7 @@ static void ethpipe_send(void)
 		}
 
 #if 0
+		int i;
 		printk("PKT:");
 		printk(" %d", magic);
 		printk(" %d", frame_len);
@@ -111,6 +116,10 @@ static void ethpipe_send(void)
 #endif
 
 		ring_read_next_aligned(txq, EP_HDR_SIZE + frame_len);
+
+		if ((++pdev->tx_counter % 10000) == 0)
+			pr_info("tx_counter: %d\n", pdev->tx_counter);
+
 	}
 
 	return;
@@ -135,39 +144,49 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 
 	func_enter();
 
-	// userland to wrq
+	// check count :todo
+
+	// reset wrq
 	wrq->write = wrq->start;
 	wrq->read = wrq->start;
-	if (copy_from_user(wrq->write, buf, count)) {
+
+	// userland to wrq
+	if (copy_from_user((uint8_t *)wrq->write, buf, count)) {
 		pr_info("copy_from_user failed. \n");
 		RING_INFO(wrq);
 		RING_INFO(txq);
 		return -EFAULT;
 	}
+
+	// Don't need check the buffer status of wrq.
+	// because wrq is always reset entering ethpipe_write.
 	ring_write_next(wrq, count);
 
 	// wrq to txq
 	while (!ring_empty(wrq)) {
+		// check magic code
 		magic = ring_next_magic(wrq);
 		if (magic != EP_MAGIC) {
 			pr_info("format error: magic code %X\n", (int)magic);
 			return -EFAULT;
 		}
 
+		// check frame length
 		frame_len = ring_next_frame_len(wrq);
 		if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
 			pr_info("packet size error: %X\n", (int)frame_len);
 			return -EFAULT;
 		}
 
+		// memcpy
 		len = EP_HDR_SIZE + frame_len;
 		if (!ring_almost_full(txq)) {
-			memcpy(txq->write, wrq->read, len);
+			memcpy((uint8_t *)txq->write, (uint8_t *)wrq->read, len);
 			ring_read_next(wrq, len);
 			ring_write_next_aligned(txq, len);
 		} else {
 			// return when a ring buffer reached the max size
-			printk("full!!!\n");
+			pr_info("txq is full.\n");
 			break;
 		}
 	}
@@ -205,7 +224,7 @@ static long ethpipe_ioctl(struct file *filp,
 }
 
 
-static int ethpipe_tx_kthread(void *arg)
+static int ethpipe_tx_kthread(void *unused)
 {
 	int cpu = smp_processor_id();
 
@@ -217,7 +236,7 @@ static int ethpipe_tx_kthread(void *arg)
 		//pr_info("[kthread] my cpu is %d (%d, HZ=%d)\n", cpu, i++, HZ);
 
 		if (pdev->txq.read == pdev->txq.write) {
-			schedule_timeout_interruptible(1000);
+			schedule_timeout_interruptible(10);
 			continue;
 		}
 
@@ -239,6 +258,9 @@ static int ethpipe_tx_kthread(void *arg)
 
 static void ethpipe_free(void)
 {
+
+	kthread_stop(pdev->txth.tsk);
+
 	/* free tx buffer */
 	if (pdev->txq.start) {
 		vfree(pdev->txq.start);
@@ -251,7 +273,17 @@ static void ethpipe_free(void)
 		pdev->wrq.start = NULL;
 	}
 
-	kthread_stop(pdev->txth.tsk);
+	/* free rx buffer */
+	if (pdev->rxq.start) {
+		vfree(pdev->rxq.start);
+		pdev->rxq.start = NULL;
+	}
+
+	/* free read buffers */
+	if (pdev->rdq.start) {
+		vfree(pdev->rdq.start);
+		pdev->rdq.start = NULL;
+	}
 
 	if (pdev) {
 		kfree(pdev);
@@ -272,6 +304,9 @@ static int __init ethpipe_init(void)
 		goto error;
 	}
 
+	pdev->tx_counter = 0;
+	pdev->rx_counter = 0;
+
 	/* tx ring size from module parameter */
 	pdev->txq_size = txq_size * 1024 * 1024;
 	pr_info("pdev->txq_size: %d\n", pdev->txq_size);
@@ -280,35 +315,64 @@ static int __init ethpipe_init(void)
 	pdev->rxq_size = rxq_size * 1024 * 1024;
 	pr_info("pdev->rxq_size: %d\n", pdev->rxq_size);
 
+	/* write ring size from module parameter */
+	pdev->wrq_size = wrq_size * 1024 * 1024;
+	pr_info("pdev->wrq_size: %d\n", pdev->wrq_size);
+
+	/* read ring size from module parameter */
+	pdev->rdq_size = rdq_size * 1024 * 1024;
+	pr_info("pdev->rdq_size: %d\n", pdev->rdq_size);
+
+	/* setup transmit buffer */
+	if ((pdev->txq.start = vmalloc(pdev->txq_size + MAX_PKT_SIZE)) == 0) {
+		pr_info("fail to vmalloc: txq\n");
+		goto error;
+	}
+	pdev->txq.size  = pdev->txq_size;
+	pdev->txq.mask  = pdev->txq_size - 1;
+	pdev->txq.end   = pdev->txq.start + pdev->txq_size - 1;
+	pdev->txq.write = pdev->txq.start;
+	pdev->txq.read  = pdev->txq.start;
+
+	/* setup receive buffer */
+	if ((pdev->rxq.start = vmalloc(pdev->rxq_size + MAX_PKT_SIZE)) == 0) {
+		pr_info("fail to vmalloc: rxq\n");
+		goto error;
+	}
+	pdev->rxq.size  = pdev->rxq_size;
+	pdev->rxq.mask  = pdev->rxq_size - 1;
+	pdev->rxq.end   = pdev->rxq.start + pdev->rxq_size - 1;
+	pdev->rxq.write = pdev->rxq.start;
+	pdev->rxq.read  = pdev->rxq.start;
+
+	/* setup write buffer */
+	if ((pdev->wrq.start = vmalloc(pdev->wrq_size + MAX_PKT_SIZE)) == 0) {
+		pr_info("fail to vmalloc: wrq\n");
+		goto error;
+	}
+	pdev->wrq.size  = pdev->wrq_size;
+	pdev->wrq.mask  = pdev->wrq_size - 1;
+	pdev->wrq.end   = pdev->wrq.start + pdev->wrq_size - 1;
+	pdev->wrq.write = pdev->wrq.start;
+	pdev->wrq.read  = pdev->wrq.start;
+
+	/* setup read buffer */
+	if ((pdev->rdq.start = vmalloc(pdev->rdq_size + MAX_PKT_SIZE)) == 0) {
+		pr_info("fail to vmalloc: rdq\n");
+		goto error;
+	}
+	pdev->rdq.size  = pdev->rdq_size;
+	pdev->rdq.mask  = pdev->rdq_size - 1;
+	pdev->rdq.end   = pdev->rdq.start + pdev->rdq_size - 1;
+	pdev->rdq.write = pdev->rdq.start;
+	pdev->rdq.read  = pdev->rdq.start;
+
 	// create tx thread
 	pdev->txth.tsk = kthread_run(ethpipe_tx_kthread, NULL, "tx_kthread");
 	if (IS_ERR(pdev->txth.tsk)) {
 		pr_info("can't create tx thread\n");
 		goto error;
 	}
-
-	/* init transmit buffer */
-	if ((pdev->txq.start = vmalloc(pdev->txq_size)) == 0) {
-		pr_info("fail to vmalloc: txq\n");
-		goto error;
-	}
-	pdev->txq.end   = pdev->txq.start + pdev->txq_size - MAX_PKT_SIZE;
-	pdev->txq.write = pdev->txq.start;
-	pdev->txq.read  = pdev->txq.start;
-	pdev->txq.size  = pdev->txq_size;
-	pdev->txq.mask  = pdev->txq_size - 1;
-
-	/* init write buffer */
-	if ((pdev->wrq.start = vmalloc(pdev->txq_size)) == 0) {
-		pr_info("fail to vmalloc: wrq\n");
-		goto error;
-	}
-	pdev->wrq.end   = pdev->wrq.start + pdev->txq_size - MAX_PKT_SIZE;
-	pdev->wrq.write = pdev->wrq.start;
-	pdev->wrq.read  = pdev->wrq.start;
-	pdev->wrq.size  = pdev->txq_size;
-	pdev->wrq.mask  = pdev->txq_size - 1;
-
 
 	/* register character device */
 	sprintf(name, "%s/%d", DRV_NAME, idx);
@@ -348,5 +412,9 @@ MODULE_PARM_DESC(debug, "Enable debug mode");
 module_param(txq_size, int, S_IRUGO);
 MODULE_PARM_DESC(txq_size, "TX ring size on each xmit kthread (MB)");
 module_param(rxq_size, int, S_IRUGO);
-MODULE_PARM_DESC(rxq_size, "RX ring size on each xmit kthread (MB)");
+MODULE_PARM_DESC(rxq_size, "RX ring size on each recv kthread (MB)");
+module_param(wrq_size, int, S_IRUGO);
+MODULE_PARM_DESC(wrq_size, "Write ring size on ep_write (dMB)");
+module_param(rdq_size, int, S_IRUGO);
+MODULE_PARM_DESC(rdq_size, "Read ring size on ep_read (MB)");
 
