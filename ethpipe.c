@@ -117,9 +117,8 @@ static void ethpipe_send(void)
 
 		ring_read_next_aligned(txq, EP_HDR_SIZE + frame_len);
 
-		if ((++pdev->tx_counter % 10000) == 0)
-			pr_info("tx_counter: %d\n", pdev->tx_counter);
-
+		// incr tx_counter
+		++pdev->tx_counter;
 	}
 
 	return;
