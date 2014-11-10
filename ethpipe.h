@@ -89,10 +89,10 @@ static struct ep_dev *pdev;
 
 /* Module parameters, defaults. */
 static int debug = 0;
-static int txq_size = 1;
-static int rxq_size = 1;
-static int wrq_size = 1;
-static int rdq_size = 1;
+static int txq_size = 4;
+static int rxq_size = 4;
+static int wrq_size = 4;
+static int rdq_size = 4;
 
 
 static inline uint32_t ring_count(const struct ep_ring *r)

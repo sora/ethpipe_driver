@@ -243,9 +243,10 @@ int main(int argc, char **argv)
     build_pack(pack, pkt, npkt, pktlen);
     while (nleft > 0) {
       if ((cnt = write(1, ptr, packlen)) <= 0) {
-        fprintf(stderr, "can't write to file: ret=%d\n", cnt);
-        fprintf(stderr, "nloop: %d, nleft: %d\n", nloop, nleft);
-        goto out;
+//        fprintf(stderr, "can't write to file: ret=%d\n", cnt);
+//        fprintf(stderr, "nloop: %d, nleft: %d\n", nloop, nleft);
+//        goto out;
+          ;
       }
       nleft -= cnt;
       ptr += cnt;
