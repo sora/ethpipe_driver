@@ -80,7 +80,7 @@ static ssize_t ethpipe_read(struct file *filp, char __user *buf,
 static void ethpipe_send(void)
 {
 	int limit;
-	uint32_t magic, frame_len;
+	uint16_t magic, frame_len;
 	struct ep_ring *txq = &pdev->txq;
 
 	func_enter();
@@ -93,14 +93,14 @@ static void ethpipe_send(void)
 		// check magic code
 		magic = ring_next_magic(txq);
 		if (magic != EP_MAGIC) {
-			pr_info("format error: magic code %X\n", (int)magic);
+			pr_info("packet format error: magic=%X\n", (int)magic);
 			goto error;
 		}
 
 		// check frame length
 		frame_len = ring_next_frame_len(txq);
 		if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
-			pr_info("packet size error: %X\n", (int)frame_len);
+			pr_info("packet format error: frame_len=%X\n", (int)frame_len);
 			goto error;
 		}
 
@@ -137,7 +137,9 @@ error:
 static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 			    size_t count, loff_t *ppos)
 {
-	uint32_t magic, frame_len, len;
+	uint16_t magic, frame_len, len;
+	uint8_t ts_reg;
+	bool ts_reset;
 	struct ep_ring *wrq = &pdev->wrq;
 	struct ep_ring *txq = &pdev->txq;
 
@@ -166,14 +168,26 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 		// check magic code
 		magic = ring_next_magic(wrq);
 		if (magic != EP_MAGIC) {
-			pr_info("format error: magic code %X\n", (int)magic);
+			pr_info("packet format error: magic=%X\n", (int)magic);
 			return -EFAULT;
 		}
 
 		// check frame length
 		frame_len = ring_next_frame_len(wrq);
 		if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
-			pr_info("packet size error: %X\n", (int)frame_len);
+			pr_info("packet format error: frame_len=%X\n", (int)frame_len);
+			return -EFAULT;
+		}
+
+		// check timestamp
+		ts_reset = ring_next_ts_reset(wrq);
+		if (ts_reset > 1) {
+			pr_info("packet format error: ts_reset=%X\n", (int)ts_reset);
+			return -EFAULT;
+		}
+		ts_reg = ring_next_ts_reg(wrq);
+		if (ts_reg >= NUM_TX_TIMESTAMP_REG) {
+			pr_info("packet format error: ts_reg=%X\n", (int)ts_reset);
 			return -EFAULT;
 		}
 
@@ -324,7 +338,8 @@ static int __init ethpipe_init(void)
 	pr_info("pdev->rdq_size: %d\n", pdev->rdq_size);
 
 	/* setup transmit buffer */
-	if ((pdev->txq.start = vmalloc(pdev->txq_size + MAX_PKT_SIZE)) == 0) {
+	if ((pdev->txq.start =
+			vmalloc(pdev->txq_size + EP_HDR_SIZE + MAX_PKT_SIZE)) == 0) {
 		pr_info("fail to vmalloc: txq\n");
 		goto error;
 	}
@@ -335,7 +350,8 @@ static int __init ethpipe_init(void)
 	pdev->txq.read  = pdev->txq.start;
 
 	/* setup receive buffer */
-	if ((pdev->rxq.start = vmalloc(pdev->rxq_size + MAX_PKT_SIZE)) == 0) {
+	if ((pdev->rxq.start =
+			vmalloc(pdev->rxq_size + EP_HDR_SIZE + MAX_PKT_SIZE)) == 0) {
 		pr_info("fail to vmalloc: rxq\n");
 		goto error;
 	}
@@ -346,7 +362,8 @@ static int __init ethpipe_init(void)
 	pdev->rxq.read  = pdev->rxq.start;
 
 	/* setup write buffer */
-	if ((pdev->wrq.start = vmalloc(pdev->wrq_size + MAX_PKT_SIZE)) == 0) {
+	if ((pdev->wrq.start =
+			vmalloc(pdev->wrq_size + EP_HDR_SIZE + MAX_PKT_SIZE)) == 0) {
 		pr_info("fail to vmalloc: wrq\n");
 		goto error;
 	}
@@ -357,7 +374,8 @@ static int __init ethpipe_init(void)
 	pdev->wrq.read  = pdev->wrq.start;
 
 	/* setup read buffer */
-	if ((pdev->rdq.start = vmalloc(pdev->rdq_size + MAX_PKT_SIZE)) == 0) {
+	if ((pdev->rdq.start =
+			vmalloc(pdev->rdq_size + EP_HDR_SIZE + MAX_PKT_SIZE)) == 0) {
 		pr_info("fail to vmalloc: rdq\n");
 		goto error;
 	}

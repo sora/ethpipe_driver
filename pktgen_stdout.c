@@ -13,23 +13,23 @@
 #include <netinet/udp.h>
 
 
-#define PKTGEN_MAGIC   (0xbe9be955)
-#define ETH_DST_MAC    (0x020000000002)
-#define ETH_SRC_MAC    (0x020000000001)
+#define PKTGEN_MAGIC   0xbe9be955
+#define ETH_DST_MAC    0x020000000002
+#define ETH_SRC_MAC    0x020000000001
 
 #define IP4_SRC_IP     "10.0.0.1"
 #define IP4_DST_IP     "10.0.0.2"
-#define IP4_TTL        (0x20)
-#define IP4_PROTO_UDP  (0x11)
+#define IP4_TTL        0x20
+#define IP4_PROTO_UDP  0x11
 
-#define UDP_SRC_PORT   (0x09)
-#define UDP_DST_PORT   (0x09)
+#define UDP_SRC_PORT   0x09
+#define UDP_DST_PORT   0x09
 
-#define PKTDEV_HDR_LEN (4)
-#define ETH_HDR_LEN    (14)
-#define IP4_HDR_LEN    (20)
+#define PKTDEV_HDR_LEN 12
+#define ETH_HDR_LEN    14
+#define IP4_HDR_LEN    20
 
-#define PKTDEV_MAGIC   (0x3776)
+#define PKTDEV_MAGIC   0x3776
 
 /* from netmap pkt-gen.c */
 static uint16_t checksum(const void * data, uint16_t len, uint32_t sum)
@@ -69,14 +69,15 @@ static u_int16_t wrapsum(u_int32_t sum)
 struct pd_hdr {
   u_int16_t pd_magic;
   u_int16_t pd_frame_len;
-};
+  u_int64_t pd_time;
+} __attribute__((packed));
 
 /* pktgen header */
 struct pg_hdr {
   u_int32_t pg_magic;
   u_int32_t pg_id;
   u_int64_t pg_time;
-};
+} __attribute__((packed));
 
 /* packet */
 struct pktgen_pkt {
@@ -96,6 +97,7 @@ void set_pdhdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
 
   pd->pd_magic = htons(PKTDEV_MAGIC);
   pd->pd_frame_len = htons(frame_len);
+  pd->pd_time = 0;
 
   return;
 }
@@ -168,7 +170,7 @@ void set_pghdr(struct pktgen_pkt *pkt)
 };
 
 unsigned short id = 0;
-void build_pack(char *pack, struct pktgen_pkt *pkt,
+void inline build_pack(char *pack, struct pktgen_pkt *pkt,
     unsigned int npkt, int pktlen)
 {
   int i, offset;
@@ -177,7 +179,8 @@ void build_pack(char *pack, struct pktgen_pkt *pkt,
   for (i = 0; i < npkt; i++) {
     pkt->ip.ip_id = htons(id);
     pkt->pg.pg_id = htonl((u_int32_t)id++);
-    pkt->ip.ip_sum = wrapsum(checksum(&pkt->ip, sizeof(struct ip), 0));
+    //pkt->ip.ip_sum = wrapsum(checksum(&pkt->ip, sizeof(struct ip), 0));
+    pkt->ip.ip_sum = 0;
     memcpy(pack + offset, pkt, sizeof(struct pktgen_pkt));
     offset += pktlen;
   }
@@ -243,9 +246,7 @@ int main(int argc, char **argv)
     build_pack(pack, pkt, npkt, pktlen);
     while (nleft > 0) {
       if ((cnt = write(1, ptr, nleft)) <= 0) {
-//        fprintf(stderr, "can't write to file: ret=%d\n", cnt);
-//        fprintf(stderr, "nloop: %d, nleft: %d\n", nloop, nleft);
-//        goto out;
+          // :todo (check errno)
           ;
       }
       nleft -= cnt;
@@ -262,3 +263,4 @@ out:
 
   return ret;
 }
+

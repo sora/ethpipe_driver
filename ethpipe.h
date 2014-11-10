@@ -26,15 +26,16 @@
 #define DRV_NAME "ethpipe"
 
 #define EP_MAGIC           0x3776
-#define EP_HDR_SIZE        4
+#define EP_HDR_SIZE        12       // magic:2 + frame_len:2 + ts:8
 #define MAX_PKT_SIZE       9014
 #define MIN_PKT_SIZE       40
 #define RING_ALMOST_FULL   (MAX_PKT_SIZE*2)
 #define XMIT_BUDGET        0x3F
 
-/* EtherPIPE NIC IOMMU registers */
-#define TX0_WRITE_ADDR     (0x30)
-#define TX0_READ_ADDR      (0x34)
+/* NIC parameters */
+#define TX0_WRITE_ADDR          0x30
+#define TX0_READ_ADDR           0x34
+#define NUM_TX_TIMESTAMP_REG    2
 
 
 #define func_enter() pr_debug("entering %s\n", __func__);
@@ -61,6 +62,17 @@ struct ep_ring {
 	volatile uint8_t *read;   /* next position to be read */
 	volatile uint8_t *write;  /* next position to be written */
 };
+
+/*
+struct ep_timestamp_hdr {
+	bool reset;
+	uint8_t reg;
+	struct val {
+		uint16_t high;
+		uint32_t low;
+	} val;
+};
+*/
 
 struct ep_dev {
 	int txq_size;          /* TX ring size */
@@ -115,15 +127,38 @@ static inline bool ring_almost_full(const struct ep_ring *r)
 	return !!(ring_free_count(r) < RING_ALMOST_FULL);
 }
 
-static inline uint32_t ring_next_magic(struct ep_ring *r)
+static inline uint16_t ring_next_magic(struct ep_ring *r)
 {
 	return (r->read[0] << 8) | r->read[1];
 }
 
-static inline uint32_t ring_next_frame_len(struct ep_ring *r)
+static inline uint16_t ring_next_frame_len(struct ep_ring *r)
 {
 	return (r->read[2] << 8) | r->read[3];
 }
+
+static inline bool ring_next_ts_reset(struct ep_ring *r)
+{
+	return r->read[4];
+}
+
+static inline uint8_t ring_next_ts_reg(struct ep_ring *r)
+{
+	return r->read[5];
+}
+
+/*
+static inline uint16_t ring_next_ts_val_high(struct ep_ring *r)
+{
+	return (r->read[6] << 8) | r->read[7];
+}
+
+static inline uint32_t ring_next_ts_val_low(struct ep_ring *r)
+{
+	return (r->read[ 8] << 24) | (r->read[9] << 16)
+	     | (r->read[10] <<  8) | r->read[11]
+}
+*/
 
 static inline void ring_write_next(struct ep_ring *r, uint32_t size)
 {
