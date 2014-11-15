@@ -67,10 +67,10 @@ static u_int16_t wrapsum(u_int32_t sum)
 
 /* pktdev header */
 struct pd_hdr {
-  u_int16_t pd_magic;
-  u_int16_t pd_frame_len;
-  u_int64_t pd_time;
-} __attribute__((packed));
+  u_int16_t pd_magic;       /* le */
+  u_int16_t pd_frame_len;   /* le */
+  u_int64_t pd_time;        /* le */
+} __attribute__((packed));  /* le */
 
 /* pktgen header */
 struct pg_hdr {
@@ -95,8 +95,8 @@ void set_pdhdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
   struct pd_hdr *pd;
   pd = &pkt->pd;
 
-  pd->pd_magic = htons(PKTDEV_MAGIC);
-  pd->pd_frame_len = htons(frame_len);
+  pd->pd_magic = PKTDEV_MAGIC;
+  pd->pd_frame_len = frame_len;
   pd->pd_time = 0;
 
   return;

@@ -61,6 +61,13 @@ struct ep_timestamp_hdr {
 };
 */
 
+struct ep_hw_pkt {
+	uint16_t len;                  /* frame length */
+	uint32_t hash;                 /* unused. reserved */
+	uint64_t ts;                   /* timestamp */
+	uint8_t body[MAX_PKT_SIZE];    /* ethnet frame data */
+} __attribute__((__packed__));
+
 struct mmio {
 	uint8_t *virt;
 	uint64_t start;
@@ -135,15 +142,20 @@ static inline bool ring_almost_full(const struct ep_ring *r)
 
 static inline uint16_t ring_next_magic(struct ep_ring *r)
 {
-	return (r->read[0] << 8) | r->read[1];
+	return *(uint16_t *)&r->read[0];
 }
 
 static inline uint16_t ring_next_frame_len(struct ep_ring *r)
 {
-	return (r->read[2] << 8) | r->read[3];
+	return *(uint16_t *)&r->read[2];
 }
 
-static inline bool ring_next_ts_reset(struct ep_ring *r)
+static inline uint64_t ring_next_timestamp(struct ep_ring *r)
+{
+	return *(uint64_t *)&r->read[4];
+}
+
+static inline uint8_t ring_next_ts_reset(struct ep_ring *r)
 {
 	return r->read[4];
 }
@@ -152,19 +164,6 @@ static inline uint8_t ring_next_ts_reg(struct ep_ring *r)
 {
 	return r->read[5];
 }
-
-/*
-static inline uint16_t ring_next_ts_val_high(struct ep_ring *r)
-{
-	return (r->read[6] << 8) | r->read[7];
-}
-
-static inline uint32_t ring_next_ts_val_low(struct ep_ring *r)
-{
-	return (r->read[ 8] << 24) | (r->read[9] << 16)
-	     | (r->read[10] <<  8) | r->read[11]
-}
-*/
 
 static inline void ring_write_next(struct ep_ring *r, uint32_t size)
 {
