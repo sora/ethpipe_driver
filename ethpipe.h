@@ -1,26 +1,12 @@
+#ifndef _ETHPIPE_H_
+#define _ETHPIPE_H_
+
+#undef pr_fmt
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/module.h>
 #include <linux/semaphore.h>
-#include <linux/miscdevice.h>
-#include <linux/fs.h>
-#include <linux/poll.h>
-#include <linux/string.h>
-#include <linux/pci.h>
-#include <linux/wait.h>
-#include <linux/sched.h>
-#include <linux/interrupt.h>
-
-#include <linux/types.h>
-#include <linux/vmalloc.h>
-#include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/init.h>
-
 #include <linux/kthread.h>
-#include <linux/delay.h>
-#include <linux/jiffies.h>
-#include <linux/smp.h>
+#include <linux/pci.h>
 
 #define VERSION  "0.4.0"
 #define DRV_NAME "ethpipe"
@@ -36,6 +22,7 @@
 #define TX0_WRITE_ADDR          0x30
 #define TX0_READ_ADDR           0x34
 #define NUM_TX_TIMESTAMP_REG    2
+#define DMA_BUF_MAX             (1024*1024)
 
 
 #define func_enter() pr_debug("entering %s\n", __func__);
@@ -74,6 +61,22 @@ struct ep_timestamp_hdr {
 };
 */
 
+struct mmio {
+	uint8_t *virt;
+	uint64_t start;
+	uint64_t end;
+	uint64_t flags;
+	uint64_t len;
+};
+
+struct ecp3versa {
+	struct pci_dev *pcidev;
+	struct mmio mmio0;
+	struct mmio mmio1;
+	volatile uint32_t *tx_write;
+	volatile uint32_t *tx_read;
+};
+
 struct ep_dev {
 	int txq_size;          /* TX ring size */
 	int rxq_size;          /* RX ring size */
@@ -94,6 +97,9 @@ struct ep_dev {
 	/* RX wait queue */
 	wait_queue_head_t read_q;
 	struct semaphore pktdev_sem;
+
+	/* NIC */
+	struct ecp3versa nic;
 };
 
 /* Global variables */
@@ -201,4 +207,6 @@ static inline uint32_t pcie_pio_read(uint32_t *p, uint32_t n)
 {
 	return ALIGN(n, 2) << 1;
 }
+#endif /* _ETHPIPE_H_ */
+
 
