@@ -1,6 +1,6 @@
 ifneq ($(KERNELRELEASE),)
-obj-m		:= ethpipe1g.o
-ethpipe1g-objs := ethpipe.o
+obj-m		:= ethpipe.o
+ethpipe-objs := ethpipe_main.o
 else
 KDIR		:= /lib/modules/$(shell uname -r)/build/
 PWD		:= $(shell pwd)
