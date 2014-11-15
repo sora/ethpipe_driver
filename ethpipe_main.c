@@ -30,7 +30,7 @@ static unsigned int ethpipe_poll( struct file* filp, poll_table* wait );
 static long ethpipe_ioctl(struct file *filp,
 		unsigned int cmd, unsigned long arg);
 
-static void ethpipe_send_dummy(void);
+static void ethpipe_send(void);
 static int ethpipe_tx_kthread(void *unused);
 static int ethpipe_pdev_init(void);
 static void ethpipe_pdev_free(void);
@@ -117,9 +117,9 @@ static ssize_t ethpipe_read(struct file *filp, char __user *buf,
 
 
 /*
- * ethpipe_send_dummy
+ * ethpipe_send
  */
-static void ethpipe_send_dummy(void)
+static void ethpipe_send(void)
 {
 	int limit;
 	uint16_t magic, frame_len;
@@ -298,7 +298,7 @@ static int ethpipe_tx_kthread(void *unused)
 
 		__set_current_state(TASK_RUNNING);
 
-		ethpipe_send_dummy();
+		ethpipe_send();
 		if (need_resched())
 			schedule();
 		else
