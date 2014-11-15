@@ -62,10 +62,10 @@ struct ep_timestamp_hdr {
 */
 
 struct ep_hw_pkt {
-	uint16_t len;                  /* frame length */
-	uint32_t hash;                 /* unused. reserved */
-	uint64_t ts;                   /* timestamp */
-	uint8_t body[MAX_PKT_SIZE];    /* ethnet frame data */
+	uint16_t len;       /* frame length */
+	uint32_t hash;      /* unused. reserved */
+	uint64_t ts;        /* timestamp */
+	uint8_t body[1];    /* ethnet frame data */
 } __attribute__((__packed__));
 
 struct mmio {
@@ -104,6 +104,9 @@ struct ep_dev {
 	/* RX wait queue */
 	wait_queue_head_t read_q;
 	struct semaphore pktdev_sem;
+
+	/* temporary buffer for build packet */
+	struct ep_hw_pkt *hw_pkt;
 
 	/* NIC */
 	struct ecp3versa nic;

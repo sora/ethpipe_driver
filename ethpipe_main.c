@@ -30,14 +30,18 @@ static unsigned int ethpipe_poll( struct file* filp, poll_table* wait );
 static long ethpipe_ioctl(struct file *filp,
 		unsigned int cmd, unsigned long arg);
 
-static void ethpipe_send(void);
+static inline void ethpipe_send(void);
+static inline int ethpipe_xmit(void);
 static int ethpipe_tx_kthread(void *unused);
+static inline void ethpipe_recv(void);
 static int ethpipe_pdev_init(void);
 static void ethpipe_pdev_free(void);
 
+#if 0
 static int ethpipe_nic_init(struct pci_dev *pcidev,
 		const struct pci_device_id *ent);
 static void ethpipe_nic_remove(struct pci_dev *pcidev);
+#endif
 
 
 static struct file_operations ethpipe_fops = {
@@ -56,6 +60,7 @@ static struct miscdevice ethpipe_dev = {
 	.fops = &ethpipe_fops,
 };
 
+#if 0
 DEFINE_PCI_DEVICE_TABLE(ethpipe_pci_tbl) = {
 	{0x3776, 0x8001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{0,}
@@ -70,6 +75,7 @@ struct pci_driver ethpipe_pci_driver = {
 //	.suspend = ethpipe_suspend,
 //	.resume = ethpipe_resume,
 };
+#endif
 
 
 /*
@@ -95,7 +101,7 @@ static int ethpipe_release(struct inode *inode, struct file *filp)
 /*
  * ethpipe_recv
  */
-static void ethpipe_recv(void)
+static inline void ethpipe_recv(void)
 {
 	func_enter();
 
@@ -115,14 +121,67 @@ static ssize_t ethpipe_read(struct file *filp, char __user *buf,
 	return count;
 }
 
+/*
+ * build_ep_pkt
+ */
+static inline int build_ep_pkt(struct ep_hw_pkt *pkt)
+{
+	uint16_t magic;
+	int len;
+	struct ep_ring *txq = &pdev->txq;
+
+	// check magic code
+	magic = ring_next_magic(txq);
+	if (magic != EP_MAGIC) {
+		pr_info("packet format error: magic=%X\n", (int)magic);
+		return 0;
+	}
+	// check frame length
+	pkt->len = ring_next_frame_len(txq);
+	if ((pkt->len > MAX_PKT_SIZE) || (pkt->len < MIN_PKT_SIZE)) {
+		pr_info("packet format error: frame_len=%X\n", (int)pkt->len);
+		return 0;
+	}
+	pkt->hash = 0;
+	pkt->ts = ring_next_timestamp(txq);
+
+	len = EP_HDR_SIZE + pkt->len;
+	memcpy(&pkt->body, (uint8_t *)txq->read, len);
+	ring_read_next_aligned(txq, len);
+
+	return len;
+}
+
+/*
+ * ethpipe_xmit
+ */
+#define EP_XMIT_OK    0x10
+#define EP_XMIT_BUSY  0x11
+#define EP_XMIT_ERR   0x12
+static inline int ethpipe_xmit(void)
+{
+	int ret = EP_XMIT_OK;
+	int len;
+
+	func_enter();
+
+	len = build_ep_pkt(pdev->hw_pkt);
+	if (len > 0) {
+		ret = EP_XMIT_OK;
+		//pr_info("len=%d\n", len);
+	} else {
+		ret = EP_XMIT_ERR;
+	}
+
+	return ret;
+}
 
 /*
  * ethpipe_send
  */
-static void ethpipe_send(void)
+static inline void ethpipe_send(void)
 {
-	int limit;
-	uint16_t magic, frame_len;
+	int limit, ret;
 	struct ep_ring *txq = &pdev->txq;
 
 	func_enter();
@@ -132,37 +191,16 @@ static void ethpipe_send(void)
 
 	// sending
 	while(!ring_empty(txq) && (--limit > 0)) {
-		// check magic code
-		magic = ring_next_magic(txq);
-		if (magic != EP_MAGIC) {
-			pr_info("packet format error: magic=%X\n", (int)magic);
+		ret = ethpipe_xmit();
+		if (ret == EP_XMIT_OK) {
+			++pdev->tx_counter;    // incr tx_counter
+		} else if (ret == EP_XMIT_BUSY) {
+			cpu_relax(); // or return;
+			continue;
+		} else {
 			goto error;
 		}
-
-		// check frame length
-		frame_len = ring_next_frame_len(txq);
-		if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
-			pr_info("packet format error: frame_len=%X\n", (int)frame_len);
-			goto error;
-		}
-
-#if 0
-		int i;
-		printk("PKT:");
-		printk(" %d", magic);
-		printk(" %d", frame_len);
-		for (i = 0; i < frame_len; i++) {
-			printk(" %02X", txq->read[EP_HDR_SIZE+i]);
-		}
-		printk("\n");
-#endif
-
-		ring_read_next_aligned(txq, EP_HDR_SIZE + frame_len);
-
-		// incr tx_counter
-		++pdev->tx_counter;
 	}
-
 	return;
 
 error:
@@ -342,6 +380,13 @@ static void ethpipe_pdev_free(void)
 		pdev->rdq.start = NULL;
 	}
 
+	/* free hw_pkt */
+	if (pdev->hw_pkt) {
+		kfree(pdev->hw_pkt);
+		pdev->hw_pkt = NULL;
+	}
+
+	/* free pdev */
 	if (pdev) {
 		kfree(pdev);
 		pdev = NULL;
@@ -353,7 +398,8 @@ static int ethpipe_pdev_init(void)
 	pr_info("%s\n", __func__);
 
 	/* malloc pdev */
-	if ((pdev = kmalloc(sizeof(struct ep_dev), GFP_KERNEL)) == 0) {
+	pdev = kmalloc(sizeof(struct ep_dev), GFP_KERNEL);
+	if (pdev == 0) {
 		pr_info("fail to kmalloc: *pdev\n");
 		goto err;
 	}
@@ -376,6 +422,15 @@ static int ethpipe_pdev_init(void)
 	/* read ring size from module parameter */
 	pdev->rdq_size = rdq_size * 1024 * 1024;
 	pr_info("pdev->rdq_size: %d\n", pdev->rdq_size);
+
+	/* temporary buffer for build paket */
+	pdev->hw_pkt = (struct ep_hw_pkt *)kmalloc(
+			sizeof(struct ep_hw_pkt) - sizeof(uint8_t) + (sizeof(uint8_t) * MAX_PKT_SIZE),
+			GFP_KERNEL);
+	if (pdev->hw_pkt == 0) {
+		pr_info("fail to kmalloc: *pdev->hw_pkt\n");
+		goto err;
+	}
 
 	/* setup transmit buffer */
 	if ((pdev->txq.start =
@@ -438,6 +493,7 @@ err:
 	return -1;
 }
 
+#if 0
 /*
  * ethpipe_nic_init()
  */
@@ -539,6 +595,7 @@ static void ethpipe_nic_remove(struct pci_dev *pcidev)
 	pci_release_regions(pcidev);
 	pci_disable_device(pcidev);
 }
+#endif
 
 /*
  * ethpipe_init()
@@ -563,10 +620,17 @@ static int __init ethpipe_init(void)
 	if (ret < 0)
 		goto error;
 
+#if 0
 	return pci_register_driver(&ethpipe_pci_driver);
+#endif
+#if 1
+	return 0;
+#endif
 
 error:
+#if 0
 	pci_unregister_driver(&ethpipe_pci_driver);
+#endif
 	return -1;
 }
 
@@ -578,7 +642,12 @@ static void __exit ethpipe_cleanup(void)
 	pr_info("%s\n", __func__);
 
 	misc_deregister(&ethpipe_dev);
+#if 1
+	ethpipe_pdev_free();
+#endif
+#if 0
 	pci_unregister_driver(&ethpipe_pci_driver);
+#endif
 }
 
 
