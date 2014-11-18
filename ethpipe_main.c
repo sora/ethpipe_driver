@@ -20,6 +20,10 @@
 #include <linux/pci.h>
 #include "ethpipe.h"
 
+#define EP_XMIT_OK    0x10
+#define EP_XMIT_BUSY  0x11
+#define EP_XMIT_ERR   0x12
+
 static int ethpipe_open(struct inode *inode, struct file *filp);
 static int ethpipe_release(struct inode *inode, struct file *filp);
 static ssize_t ethpipe_read(struct file *filp, char __user *buf,
@@ -31,17 +35,16 @@ static long ethpipe_ioctl(struct file *filp,
 		unsigned int cmd, unsigned long arg);
 
 static inline void ethpipe_send(void);
-static inline int ethpipe_xmit(void);
+static inline int ethpipe_xmit(uint32_t hw_write,
+		uint32_t hw_read, int len);
 static int ethpipe_tx_kthread(void *unused);
 static inline void ethpipe_recv(void);
 static int ethpipe_pdev_init(void);
 static void ethpipe_pdev_free(void);
 
-#if 0
 static int ethpipe_nic_init(struct pci_dev *pcidev,
 		const struct pci_device_id *ent);
 static void ethpipe_nic_remove(struct pci_dev *pcidev);
-#endif
 
 
 static struct file_operations ethpipe_fops = {
@@ -60,7 +63,6 @@ static struct miscdevice ethpipe_dev = {
 	.fops = &ethpipe_fops,
 };
 
-#if 0
 DEFINE_PCI_DEVICE_TABLE(ethpipe_pci_tbl) = {
 	{0x3776, 0x8001, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{0,}
@@ -75,7 +77,6 @@ struct pci_driver ethpipe_pci_driver = {
 //	.suspend = ethpipe_suspend,
 //	.resume = ethpipe_resume,
 };
-#endif
 
 
 /*
@@ -127,7 +128,6 @@ static ssize_t ethpipe_read(struct file *filp, char __user *buf,
 static inline int build_ep_pkt(struct ep_hw_pkt *pkt)
 {
 	uint16_t magic;
-	int len;
 	struct ep_ring *txq = &pdev->txq;
 
 	// check magic code
@@ -145,32 +145,55 @@ static inline int build_ep_pkt(struct ep_hw_pkt *pkt)
 	pkt->hash = 0;
 	pkt->ts = ring_next_timestamp(txq);
 
-	len = EP_HDR_SIZE + pkt->len;
-	memcpy(&pkt->body, (uint8_t *)txq->read, len);
-	ring_read_next_aligned(txq, len);
+	memcpy(&pkt->body, (uint8_t *)(txq->read + EP_HDR_SIZE), pkt->len);
 
-	return len;
+	return pkt->len;
+}
+
+/*
+ * hxtx_alomost_full
+ */
+static inline bool hwtx_almost_full(uint32_t wr, uint32_t rd)
+{
+	return !!((rd - wr - 1) < MAX_PKT_SIZE);
+}
+
+/*
+ * xmit
+ */
+static inline void xmit(uint32_t wr, struct ep_hw_pkt *pkt, int len)
+{
+	uint8_t *nic_virt = pdev->nic.mmio1.virt;
+	uint32_t tmp;
+
+	len += EP_HWHDR_SIZE;
+
+	if ((wr + len) < pdev->nic.tx.size) {
+		memcpy(nic_virt + wr, pkt, len);
+	} else {
+		tmp = pdev->nic.tx.size - wr;
+		memcpy(nic_virt + wr, pkt, tmp);
+		memcpy(nic_virt, (pkt + tmp), (len - tmp));
+	}
 }
 
 /*
  * ethpipe_xmit
  */
-#define EP_XMIT_OK    0x10
-#define EP_XMIT_BUSY  0x11
-#define EP_XMIT_ERR   0x12
-static inline int ethpipe_xmit(void)
+static inline int ethpipe_xmit(uint32_t hw_write,
+		uint32_t hw_read, int len)
 {
+	struct ep_ring *txq = &pdev->txq;
 	int ret = EP_XMIT_OK;
-	int len;
 
 	func_enter();
 
-	len = build_ep_pkt(pdev->hw_pkt);
-	if (len > 0) {
+	if (!hwtx_almost_full(hw_write, hw_read)) {
+		xmit(hw_write, pdev->hw_pkt, len);
+		ring_read_next_aligned(txq, EP_HDR_SIZE + len);
 		ret = EP_XMIT_OK;
-		//pr_info("len=%d\n", len);
 	} else {
-		ret = EP_XMIT_ERR;
+		ret = EP_XMIT_BUSY;
 	}
 
 	return ret;
@@ -181,33 +204,53 @@ static inline int ethpipe_xmit(void)
  */
 static inline void ethpipe_send(void)
 {
-	int limit, ret;
+	int limit, ret, len;
+	uint32_t hw_write, hw_read;
 	struct ep_ring *txq = &pdev->txq;
 
 	func_enter();
+
+	// read hwtx read and write address via pcie pio read
+	hw_write = read_nic_txptr((uint32_t *)pdev->nic.tx.write);
+	hw_read = read_nic_txptr((uint32_t *)pdev->nic.tx.read);
 
 	// reset xmit budget
 	limit = XMIT_BUDGET;
 
 	// sending
 	while(!ring_empty(txq) && (--limit > 0)) {
-		ret = ethpipe_xmit();
+		len = build_ep_pkt(pdev->hw_pkt);
+		if (len < 1) {
+			pr_info("err: build_ep_pkt() len=%d\n", len);
+			goto error;
+		}
+
+		ret = ethpipe_xmit(hw_write, hw_read, len);
 		if (ret == EP_XMIT_OK) {
+			hw_write = hwtx_xmit_next(hw_write, len);
 			++pdev->tx_counter;    // incr tx_counter
 		} else if (ret == EP_XMIT_BUSY) {
-			cpu_relax(); // or return;
-			continue;
+			goto out;
 		} else {
+			pr_info("err: unknown ret of ethpipe_xmit()\n");
 			goto error;
 		}
 	}
+
+	// commit to NIC via pcie pio write
+	set_nic_txptr((uint32_t *)pdev->nic.tx.write, hw_write);
+
+	// debug
+	dump_nic_info();
+
+out:
 	return;
 
 error:
 	pr_info("kthread: tx_err\n");
+	// todo: need lock
 	txq->read = txq->start;
 	txq->write = txq->start;
-
 	return;
 }
 
@@ -493,7 +536,6 @@ err:
 	return -1;
 }
 
-#if 0
 /*
  * ethpipe_nic_init()
  */
@@ -543,6 +585,7 @@ static int ethpipe_nic_init(struct pci_dev *pcidev,
 		pr_info("cannot ioremap MMIO1 base\n");
 		goto error;
 	}
+	pr_info("mmio1_virt : %p\n", mmio1->virt);
 	pr_info("mmio1_start: %X\n", (unsigned int)mmio1->start);
 	pr_info("mmio1_end  : %X\n", (unsigned int)mmio1->end);
 	pr_info("mmio1_flags: %X\n", (unsigned int)mmio1->flags);
@@ -551,14 +594,22 @@ static int ethpipe_nic_init(struct pci_dev *pcidev,
 
 	/* initial NIC hardware registers */
 	*(long     *)(mmio0->virt + 0x14) = DMA_BUF_MAX; /* set DMA Buffer length */
-	*(uint32_t *)(mmio0->virt + 0x30) = 0;
-	*(uint32_t *)(mmio1->virt + 0x34) = 0;
+	//*(uint32_t *)(mmio0->virt + 0x30) = 0;
+	//*(uint32_t *)(mmio1->virt + 0x34) = 0;
 	*(long     *)(mmio0->virt + 0x80) = 1; /* set min disable interrupt cycles (@125MHz) */
 	*(long     *)(mmio0->virt + 0x84) = 0xffffffff; /* set max enable interrupt cycles (@125MHz) */
 
 	/* pointer of NIC registers */
-	nic->tx_write = (uint32_t *)(mmio0->virt + 0x30);
-	nic->tx_read = (uint32_t *)(mmio0->virt + 0x34);
+	nic->tx.start = (uint32_t *)(mmio0->virt);
+	nic->tx.write = (uint32_t *)(mmio0->virt + 0x30);
+	nic->tx.read = (uint32_t *)(mmio0->virt + 0x34);
+	nic->tx.size = mmio1->len >> 1;
+	nic->tx.mask = nic->tx.size - 1;
+	nic->tx.end = (uint32_t *)(mmio0->virt + nic->tx.size - 1);
+	pr_info("nic->tx.write: %p, %X\n", nic->tx.write, *nic->tx.write);
+	pr_info("nic->tx.read: %p, %X\n", nic->tx.read, *nic->tx.read);
+	pr_info("nic->tx.end: %p\n", nic->tx.end);
+	pr_info("nic->tx.size: %X\n", (unsigned int)nic->tx.size);
 
 	return 0;
 
@@ -595,7 +646,6 @@ static void ethpipe_nic_remove(struct pci_dev *pcidev)
 	pci_release_regions(pcidev);
 	pci_disable_device(pcidev);
 }
-#endif
 
 /*
  * ethpipe_init()
@@ -620,17 +670,10 @@ static int __init ethpipe_init(void)
 	if (ret < 0)
 		goto error;
 
-#if 0
 	return pci_register_driver(&ethpipe_pci_driver);
-#endif
-#if 1
-	return 0;
-#endif
 
 error:
-#if 0
 	pci_unregister_driver(&ethpipe_pci_driver);
-#endif
 	return -1;
 }
 
@@ -642,12 +685,7 @@ static void __exit ethpipe_cleanup(void)
 	pr_info("%s\n", __func__);
 
 	misc_deregister(&ethpipe_dev);
-#if 1
-	ethpipe_pdev_free();
-#endif
-#if 0
 	pci_unregister_driver(&ethpipe_pci_driver);
-#endif
 }
 
 

@@ -13,6 +13,7 @@
 
 #define EP_MAGIC           0x3776
 #define EP_HDR_SIZE        12       // magic:2 + frame_len:2 + ts:8
+#define EP_HWHDR_SIZE      14       // frame_len:2 + hash:4 + ts:8
 #define MAX_PKT_SIZE       9014
 #define MIN_PKT_SIZE       40
 #define RING_ALMOST_FULL   (MAX_PKT_SIZE*2)
@@ -80,8 +81,14 @@ struct ecp3versa {
 	struct pci_dev *pcidev;
 	struct mmio mmio0;
 	struct mmio mmio1;
-	volatile uint32_t *tx_write;
-	volatile uint32_t *tx_read;
+	struct tx {
+		volatile uint32_t *write;
+		volatile uint32_t *read;
+		uint32_t *start;
+		uint32_t *end;
+		uint32_t size;
+		uint32_t mask;
+	} tx;
 };
 
 struct ep_dev {
@@ -200,15 +207,51 @@ static inline void ring_read_next_aligned(struct ep_ring *r, uint32_t size)
 	}
 }
 
-static inline void pcie_pio_set(uint32_t *p, uint32_t n)
+static inline uint32_t hwtx_xmit_next(uint32_t hw_write, uint32_t size)
 {
-	*p = ALIGN(n, 2) >> 1;
+	struct ecp3versa *nic = &pdev->nic;
+
+	hw_write += ALIGN(EP_HWHDR_SIZE + size, 2);
+	hw_write &= nic->tx.mask;
+
+	return hw_write;
 }
 
-static inline uint32_t pcie_pio_read(uint32_t *p, uint32_t n)
+static inline uint32_t read_nic_txptr(uint32_t *p)
 {
-	return ALIGN(n, 2) << 1;
+	return *p << 1;
 }
+
+static inline void set_nic_txptr(uint32_t *p, uint32_t addr)
+{
+	*p = addr >> 1;
+}
+
+static inline void dump_nic_info(void)
+{
+	struct ecp3versa *nic = &pdev->nic;
+	struct ep_hw_pkt *hw_pkt = pdev->hw_pkt;
+
+	pr_info("nic->tx.write: %p, %X\n", nic->tx.write, *nic->tx.write);
+	pr_info("nic->tx.read: %p, %X\n", nic->tx.read, *nic->tx.read);
+	pr_info("nic->tx.end: %p\n", nic->tx.end);
+	pr_info("nic->tx.size: %X\n", (unsigned int)nic->tx.size);
+
+	pr_info("----packet\n");
+	pr_info("hw_pkt->len: %X\n", (uint32_t)hw_pkt->len);
+	pr_info("hw_pkt->hash: %X\n", (uint32_t)hw_pkt->hash);
+	pr_info("hw_pkt->ts: %X\n", (uint32_t)hw_pkt->ts);
+	pr_info("hw_pkt->body0: %02X%02X%02X%02X%02X%02X\n",
+		hw_pkt->body[ 0], hw_pkt->body[ 1], hw_pkt->body[ 2],
+		hw_pkt->body[ 3], hw_pkt->body[ 4], hw_pkt->body[ 5]);
+	pr_info("hw_pkt->body1: %02X%02X%02X%02X%02X%02X\n",
+		hw_pkt->body[ 6], hw_pkt->body[ 7], hw_pkt->body[ 8],
+		hw_pkt->body[ 9], hw_pkt->body[10], hw_pkt->body[11]);
+	pr_info("hw_pkt->body2: %02X%02X\n",
+		hw_pkt->body[12], hw_pkt->body[13]);
+	pr_info("----packet\n");
+}
+
 #endif /* _ETHPIPE_H_ */
 
 
