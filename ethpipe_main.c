@@ -127,7 +127,7 @@ static ssize_t ethpipe_read(struct file *filp, char __user *buf,
  */
 static inline int build_ep_pkt(struct ep_hw_pkt *pkt)
 {
-	uint16_t magic;
+	uint16_t magic, frame_len;
 	struct ep_ring *txq = &pdev->txq;
 
 	// check magic code
@@ -137,17 +137,19 @@ static inline int build_ep_pkt(struct ep_hw_pkt *pkt)
 		return 0;
 	}
 	// check frame length
-	pkt->len = ring_next_frame_len(txq);
-	if ((pkt->len > MAX_PKT_SIZE) || (pkt->len < MIN_PKT_SIZE)) {
-		pr_info("packet format error: frame_len=%X\n", (int)pkt->len);
+	frame_len = ring_next_frame_len(txq);
+	if ((frame_len > MAX_PKT_SIZE) || (frame_len < MIN_PKT_SIZE)) {
+		pr_info("packet format error: frame_len=%X\n", (int)frame_len);
 		return 0;
 	}
+
+	pkt->len = (frame_len >> 8) | (frame_len & 0xFF) << 8;
 	pkt->hash = 0;
 	pkt->ts = ring_next_timestamp(txq);
 
-	memcpy(&pkt->body, (uint8_t *)(txq->read + EP_HDR_SIZE), pkt->len);
+	memcpy(&pkt->body, (uint8_t *)(txq->read + EP_HDR_SIZE), frame_len);
 
-	return pkt->len;
+	return frame_len;
 }
 
 /*
@@ -168,12 +170,14 @@ static inline void xmit(uint32_t wr, struct ep_hw_pkt *pkt, int len)
 
 	len += EP_HWHDR_SIZE;
 
-	if ((wr + len) < pdev->nic.tx.size) {
+	if ((wr + len) <= pdev->nic.tx.size) {
 		memcpy(nic_virt + wr, pkt, len);
 	} else {
 		tmp = pdev->nic.tx.size - wr;
+		//pr_info("overwriting: wr=%d, tmp=%d\n", wr, tmp);
 		memcpy(nic_virt + wr, pkt, tmp);
-		memcpy(nic_virt, (pkt + tmp), (len - tmp));
+		memcpy(nic_virt, ((uint8_t *)pkt + tmp), (len - tmp));
+		//dump_nic_info((struct ep_hw_pkt *)((uint8_t *)pkt + tmp));
 	}
 }
 
@@ -241,7 +245,7 @@ static inline void ethpipe_send(void)
 	set_nic_txptr((uint32_t *)pdev->nic.tx.write, hw_write);
 
 	// debug
-	dump_nic_info();
+	//dump_nic_info();
 
 out:
 	return;
@@ -328,6 +332,11 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 		}
 	}
 
+#if 0
+	pr_info("wrq.wr %p, wrq.rd, %p, txq.wr %p, txq.rd %p, nic.wr %d, nic.rd %d\n",
+			wrq->write, wrq->read, txq->write, txq->read,
+			*pdev->nic.tx.write, *pdev->nic.tx.read);
+#endif
 	return (count - ring_count(wrq));
 }
 

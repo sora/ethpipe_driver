@@ -173,14 +173,17 @@ unsigned short id = 0;
 void inline build_pack(char *pack, struct pktgen_pkt *pkt,
     unsigned int npkt, int pktlen)
 {
+	struct ip *ip;
   int i, offset;
+
+  ip = (struct ip *)&pkt->ip;
 
   offset = 0;
   for (i = 0; i < npkt; i++) {
-    pkt->ip.ip_id = htons(id);
+    ip->ip_id = htons(id);
     pkt->pg.pg_id = htonl((u_int32_t)id++);
-    //pkt->ip.ip_sum = wrapsum(checksum(&pkt->ip, sizeof(struct ip), 0));
-    pkt->ip.ip_sum = 0;
+    ip->ip_sum = wrapsum(checksum(ip, sizeof(*ip), 0));
+    //pkt->ip.ip_sum = 0;
     memcpy(pack + offset, pkt, sizeof(struct pktgen_pkt));
     offset += pktlen;
   }

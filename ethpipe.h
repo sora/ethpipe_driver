@@ -227,10 +227,9 @@ static inline void set_nic_txptr(uint32_t *p, uint32_t addr)
 	*p = addr >> 1;
 }
 
-static inline void dump_nic_info(void)
+static inline void dump_nic_info(struct ep_hw_pkt *hw_pkt)
 {
 	struct ecp3versa *nic = &pdev->nic;
-	struct ep_hw_pkt *hw_pkt = pdev->hw_pkt;
 
 	pr_info("nic->tx.write: %p, %X\n", nic->tx.write, *nic->tx.write);
 	pr_info("nic->tx.read: %p, %X\n", nic->tx.read, *nic->tx.read);
