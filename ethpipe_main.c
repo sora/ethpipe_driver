@@ -143,9 +143,10 @@ static inline int build_ep_pkt(struct ep_hw_pkt *pkt)
 		return 0;
 	}
 
-	pkt->len = (frame_len >> 8) | (frame_len & 0xFF) << 8;
+	pkt->len = cpu_to_be16(frame_len);
 	pkt->hash = 0;
-	pkt->ts = ring_next_timestamp(txq);
+	pkt->ts = cpu_to_be64(ring_next_timestamp(txq));
+	//pkt->ts = ring_next_timestamp(txq);
 
 	memcpy(&pkt->body, (uint8_t *)(txq->read + EP_HDR_SIZE), frame_len);
 
@@ -170,7 +171,7 @@ static inline void xmit(uint32_t wr, struct ep_hw_pkt *pkt, int len)
 
 	len += EP_HWHDR_SIZE;
 
-	if ((wr + len) <= pdev->nic.tx.size) {
+	if ((wr + len) < pdev->nic.tx.size) {
 		memcpy(nic_virt + wr, pkt, len);
 	} else {
 		tmp = pdev->nic.tx.size - wr;
@@ -280,9 +281,9 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 
 	// userland to wrq
 	if (copy_from_user((uint8_t *)wrq->write, buf, count)) {
-		pr_info("copy_from_user failed. \n");
-		RING_INFO(wrq);
-		RING_INFO(txq);
+		pr_info("copy_from_user failed. count=%d\n", (int)count);
+		//RING_INFO(wrq);
+		//RING_INFO(txq);
 		return -EFAULT;
 	}
 
@@ -306,6 +307,7 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 			return -EFAULT;
 		}
 
+#if 0
 		// check timestamp
 		ts_reset = ring_next_ts_reset(wrq);
 		if (ts_reset > 1) {
@@ -314,9 +316,10 @@ static ssize_t ethpipe_write(struct file *filp, const char __user *buf,
 		}
 		ts_reg = ring_next_ts_reg(wrq);
 		if (ts_reg >= NUM_TX_TIMESTAMP_REG) {
-			pr_info("packet format error: ts_reg=%X\n", (int)ts_reset);
+			pr_info("packet format error: ts_reg=%X\n", (int)ts_reg);
 			return -EFAULT;
 		}
+#endif
 
 		// memcpy
 		len = EP_HDR_SIZE + frame_len;
