@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -9,6 +10,7 @@
 #include <net/ethernet.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <endian.h>
 #define __FAVOR_BSD
 #include <netinet/udp.h>
 
@@ -67,9 +69,16 @@ static u_int16_t wrapsum(u_int32_t sum)
 
 /* pktdev header */
 struct pd_hdr {
-  u_int16_t pd_magic;       /* le */
-  u_int16_t pd_frame_len;   /* le */
-  u_int64_t pd_time;        /* le */
+	u_int16_t pd_magic;       /* le */
+	u_int16_t pd_frame_len;   /* le */
+	struct pd_timestamp {
+		uint32_t val_low;
+		uint16_t val_high;
+		uint8_t resv2;
+		uint8_t resv:4;
+		uint8_t reg:3;
+		bool reset:1;
+	} __attribute__((packed)) pd_time;  /* le */
 } __attribute__((packed));  /* le */
 
 /* pktgen header */
@@ -97,7 +106,12 @@ void set_pdhdr(struct pktgen_pkt *pkt, u_int16_t frame_len)
 
   pd->pd_magic = PKTDEV_MAGIC;
   pd->pd_frame_len = frame_len;
-  pd->pd_time = 0;
+  pd->pd_time.reset = 1;
+  pd->pd_time.reg = 1;
+  pd->pd_time.resv = 0;
+  pd->pd_time.resv2 = 0;
+  pd->pd_time.val_high = 0;
+  pd->pd_time.val_low = 0;
 
   return;
 }
@@ -169,9 +183,11 @@ void set_pghdr(struct pktgen_pkt *pkt)
   return;
 };
 
+//#define step 0xEE6B280
 unsigned short id = 0;
-void inline build_pack(char *pack, struct pktgen_pkt *pkt,
-    unsigned int npkt, int pktlen)
+unsigned long long ts = 0;
+static inline void build_pack(char *pack, struct pktgen_pkt *pkt,
+    unsigned int npkt, int pktlen, unsigned int step)
 {
 	struct ip *ip;
   int i, offset;
@@ -181,14 +197,20 @@ void inline build_pack(char *pack, struct pktgen_pkt *pkt,
   offset = 0;
   for (i = 0; i < npkt; i++) {
     ip->ip_id = htons(id);
+    pkt->pd.pd_time.val_low = ts & 0xFFFFFFFF;
+    pkt->pd.pd_time.val_high = (ts >> 32) & 0xFFFF;
     pkt->pg.pg_id = htonl((u_int32_t)id++);
     ip->ip_sum = wrapsum(checksum(ip, sizeof(*ip), 0));
     //pkt->ip.ip_sum = 0;
     memcpy(pack + offset, pkt, sizeof(struct pktgen_pkt));
+    pkt->pd.pd_time.reset = 0;
     offset += pktlen;
+    ts += step;
   }
 }
 
+//#define mbps 1000
+//#define step (int)(84 * (1000 / (float)mbps))
 // ./pktgen_stdout -s <frame_len> -n <npkt> -m <nloop>
 // ex(595 * 25010 = 14.88Mpps): ./pktgen_stdout -s 60 -n 595 -m 25010
 int main(int argc, char **argv)
@@ -197,10 +219,12 @@ int main(int argc, char **argv)
   const char *ptr = NULL;
   struct pktgen_pkt *pkt = NULL;
   int ret = 0, i, pktlen, packlen, cnt, nleft;
+  unsigned int step = 84;
 
   unsigned short frame_len = 60;
   unsigned int npkt = 5;
   unsigned int nloop = 10;
+  unsigned int mbps = 1000;
 
   for (i = 1; i < argc; ++i) {
     if (0 == strcmp(argv[i], "-s")) {
@@ -212,8 +236,14 @@ int main(int argc, char **argv)
     } else if (0 == strcmp(argv[i], "-m")) {
       if (++i == argc) perror("-m");
       nloop = atoi(argv[i]);
+    } else if (0 == strcmp(argv[i], "-t")) {
+      if (++i == argc) perror("-t");
+      mbps = atoi(argv[i]);
     }
   }
+
+  step = (unsigned int)(84 * (1000 / (float)mbps));
+  fprintf(stderr, "step=%d\n", step);
 
   if (frame_len < 60 || frame_len > 9014) {
     fprintf(stderr, "frame size error: %d\n", frame_len);
@@ -246,7 +276,7 @@ int main(int argc, char **argv)
   for (i = 0; i < nloop; i++) {
     nleft = packlen;
     ptr = (char *)pack;
-    build_pack(pack, pkt, npkt, pktlen);
+    build_pack(pack, pkt, npkt, pktlen, step);
     while (nleft > 0) {
       if ((cnt = write(1, ptr, nleft)) <= 0) {
           // :todo (check errno)
