@@ -64,8 +64,8 @@ struct ep_timestamp_hdr {
 
 struct ep_hw_pkt {
 	uint16_t len;       /* frame length */
-	uint32_t hash;      /* unused. reserved */
 	uint64_t ts;        /* timestamp */
+	uint32_t hash;      /* unused. reserved */
 	uint8_t body[1];    /* ethnet frame data */
 } __attribute__((__packed__));
 
